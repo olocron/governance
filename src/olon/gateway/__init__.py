@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -105,6 +106,64 @@ class CostCapExceeded(RuntimeError):
     """Raised when a run would exceed HARNESS_COST_CAP_USD (ROADMAP §2.5)."""
 
 
+class RateLimitedOut(RuntimeError):
+    """Raised when the rate-limit circuit breaker is OPEN: the provider has
+    been returning 429s, so further calls this window fail fast instead of
+    each burning seconds of retry backoff (S8 hardening).
+
+    The cycle catches agent-call exceptions and defaults to abstain, so a
+    rate-limited storm degrades a deliberation quickly instead of hanging it.
+    """
+
+
+class _RateBreaker:
+    """Circuit breaker for provider rate limits (S8 hardening).
+
+    After `threshold` consecutive rate-limited calls the breaker OPENs for
+    `cooldown_s` seconds; call_agent checks it before every call and raises
+    RateLimitedOut immediately while open (zero network, zero backoff).
+    Any success closes it. Without this, a 429 storm makes every call burn
+    ~6s of tenacity backoff before failing — a full deliberation's worth of
+    calls then takes minutes of pure sleep (the observed hang).
+    """
+
+    def __init__(self, threshold: int = 2, cooldown_s: float = 60.0) -> None:
+        self.threshold = threshold
+        self.cooldown_s = cooldown_s
+        self._consecutive = 0
+        self._open_until = 0.0  # monotonic deadline; 0 = closed
+
+    @property
+    def is_open(self) -> bool:
+        return (
+            self._consecutive >= self.threshold
+            and time.monotonic() < self._open_until
+        )
+
+    def check(self) -> None:
+        """Raise RateLimitedOut if the breaker is open."""
+        if self.is_open:
+            remaining = self._open_until - time.monotonic()
+            raise RateLimitedOut(
+                f"provider rate-limited: circuit open, retry in {remaining:.0f}s "
+                f"(after {self._consecutive} consecutive 429s)"
+            )
+
+    def record_rate_limit(self) -> None:
+        self._consecutive += 1
+        if self._consecutive >= self.threshold:
+            self._open_until = time.monotonic() + self.cooldown_s
+            log.warning(
+                "rate-limit breaker OPEN for %.0fs after %d consecutive 429s",
+                self.cooldown_s, self._consecutive,
+            )
+
+    def record_success(self) -> None:
+        if self._consecutive:
+            self._consecutive = 0
+            self._open_until = 0.0
+
+
 @dataclass
 class _CacheEntry:
     text: str
@@ -145,6 +204,7 @@ class LLMGateway:
     _override_cap_usd: float | None = field(default=None, init=False)
     _client: object | None = field(default=None, init=False)
     _cache: dict[str, _CacheEntry] = field(default_factory=dict, init=False)
+    _breaker: _RateBreaker = field(default_factory=_RateBreaker, init=False)
     spent_usd: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
@@ -196,6 +256,7 @@ class LLMGateway:
         gw._override_cap_usd = cap_usd
         gw._client = None
         gw._cache = {}
+        gw._breaker = _RateBreaker()
         gw.spent_usd = 0.0
         gw.__post_init__()
         return gw
@@ -264,9 +325,17 @@ class LLMGateway:
                 f"(cap ${cap:.2f}). Aborting per §2.5."
             )
 
-        resp = self._call_llm(
-            chosen, full_system, prompt, max_tokens, temperature
-        )
+        # S8 hardening: fail fast while the rate-limit breaker is open, and
+        # record provider 429s (post-retries) / successes to drive it.
+        self._breaker.check()
+        try:
+            resp = self._call_llm(
+                chosen, full_system, prompt, max_tokens, temperature
+            )
+        except (RateLimitError, _OARateLimitError):
+            self._breaker.record_rate_limit()
+            raise
+        self._breaker.record_success()
         text, in_tok, out_tok = self._extract_response(resp)
         cost = self._cost(chosen, in_tok, out_tok)
         self.spent_usd += cost
@@ -360,7 +429,7 @@ class LLMGateway:
     @staticmethod
     def _role_preamble(role: str) -> str:
         return (
-            f"You are the '{role}' role in OLOCRON — a consent-governed, consent-governed "
+            f"You are the '{role}' role in OLOCRON — a consent-governed "
             "collective of agents. Be precise and structured. Respond as JSON when "
             "asked. Do not roleplay other agents."
         )
@@ -419,6 +488,7 @@ __all__ = [
     "AgentResponse",
     "CostCapExceeded",
     "LLMGateway",
+    "RateLimitedOut",
     "call_agent",
     "get_gateway",
 ]

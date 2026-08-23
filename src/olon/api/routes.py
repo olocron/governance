@@ -64,20 +64,21 @@ class AgentRegistration(BaseModel):
 
     S6: optional stakeholder_type + functional_domain place the agent in the
     ABAC matrix cell, resolving its permissions + weight at registration.
+    S8: every field is length-capped (public endpoint — no unbounded input).
     """
 
-    display_name: str = Field(..., min_length=1)
-    owner: str = ""
-    capability: str = ""  # stakeholder perspective / capability
-    model: str = ""
-    endpoint: str = ""
-    api_key: str = Field("", alias="api_key")  # the registered key (opaque to MVP)
+    display_name: str = Field(..., min_length=1, max_length=120)
+    owner: str = Field("", max_length=160)
+    capability: str = Field("", max_length=2000)  # stakeholder perspective / capability
+    model: str = Field("", max_length=80)
+    endpoint: str = Field("", max_length=500)
+    api_key: str = Field("", max_length=400, alias="api_key")  # opaque to MVP
     # S6 ABAC taxonomy cell (optional; omitted = pre-S6 participant default).
-    stakeholder_type: str | None = None
-    functional_domain: str | None = None
+    stakeholder_type: str | None = Field(None, max_length=60)
+    functional_domain: str | None = Field(None, max_length=60)
     # S7 federation transport: "provider" (platform-proxy) | "endpoint" (self-hosted).
     # Omitted = auto-detect from model/endpoint fields.
-    adapter: str | None = None
+    adapter: str | None = Field(None, max_length=20)
 
 
 class AgentOut(BaseModel):
@@ -89,12 +90,12 @@ class AgentOut(BaseModel):
 
 
 class TensionSubmission(BaseModel):
-    """The tension-intake form payload (S5)."""
+    """The tension-intake form payload (S5). S8: length-capped."""
 
-    title: str = Field(..., min_length=1)
-    description: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1, max_length=300)
+    description: str = Field(..., min_length=1, max_length=5000)
     raised_by: UUID | None = None  # agent_id; defaults to the instance founder
-    priority: int = 50
+    priority: int = Field(50, ge=0, le=100)
 
 
 # ── Instance ──────────────────────────────────────────────────────────────────

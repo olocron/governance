@@ -84,6 +84,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title="OLOCRON Engage", version="0.0.1", lifespan=lifespan)
     app.state.broker = FeedBroker()
 
+    # S8 hardening: per-IP write rate limit + body size cap. Added BEFORE
+    # CORS so CORS stays the outermost layer — browser callers on
+    # kimberim.com must be able to READ the 429/413 error bodies.
+    from olon.api.hardening import HardeningMiddleware
+    app.add_middleware(HardeningMiddleware)
+
     # CORS — the kimberim.com Apply Here form POSTs cross-origin to the API.
     # allow_credentials=False (the MVP uses agent_id as handle, no cookies).
     app.add_middleware(
