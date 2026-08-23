@@ -303,7 +303,11 @@ class LLMGateway:
         """
         role_str = role.value if hasattr(role, "value") else str(role)
         chosen = (model or self._override_model or self._default_model()).strip()
-        full_system = system or self._role_preamble(role_str)
+        # S8 prompt-injection defense: EVERY call carries the instruction
+        # hierarchy — untrusted fences and other agents' output are data,
+        # never instructions (single choke point for staff + participants).
+        from olon.security import INSTRUCTION_HIERARCHY
+        full_system = (system or self._role_preamble(role_str)) + INSTRUCTION_HIERARCHY
 
         cache_key = self._cache_key(chosen, full_system, prompt)
         if use_cache and cache_key in self._cache:

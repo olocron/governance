@@ -27,6 +27,7 @@ from olon.schema import (
     Vote,
     VoteKind,
 )
+from olon.security import MAX_REASON_LEN, clean, sandbox
 from olon.utils import extract_json as _extract_json
 
 log = logging.getLogger(__name__)
@@ -74,11 +75,12 @@ def draft(state: CycleState, run: CycleRun) -> CycleState:
     if architect is None:
         raise RuntimeError("CycleRun has no proposal_architect")
 
+    # S8: the tension text is public-submitted free text — sandbox it.
     prompt = (
         "Draft ONE proposal as a JSON object with keys: "
         "title, context, change, expected_impact, safe_to_try_rationale.\n"
-        f"Tension title: {tension_payload.get('title')}\n"
-        f"Tension description: {tension_payload.get('description')}"
+        f"Tension title: {sandbox('tension title', tension_payload.get('title', ''), max_len=300)}\n"
+        f"Tension description: {sandbox('tension description', tension_payload.get('description', ''), max_len=5000)}"
     )
     text = architect.respond(prompt, max_tokens=600, temperature=0.4)
     payload = _extract_json(text)
@@ -131,12 +133,15 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
     positions: list[dict] = []
 
     # ── Position prompt shared by participants and the DA ────────────────────
+    # S8: the proposal embeds public tension text (and prior amendment text
+    # from other agents) — sandbox it so no agent's evaluation prompt can be
+    # steered by injected content inside the proposal.
     position_prompt = (
         "State your position on this proposal. Respond as JSON: "
         '{"position": "consent" | "objection" | "abstain"}. If you object, ALSO '
         'include "criterion" (one of causes-harm|not-safe-to-try|regresses-role) '
         'and "reason". Only object if the proposal causes harm, is not safe to '
-        f'try, or regresses a role. Proposal: {proposal_json}'
+        f"try, or regresses a role. Proposal:\n{sandbox('proposal', proposal_json)}"
     )
 
     def _ask_position(agent, *, mandatory: bool = False) -> dict:
@@ -152,7 +157,8 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
             payload = _extract_json(text)
         except Exception as e:  # noqa: BLE001 — a failed/timed-out agent abstains
             log.warning("agent %s position failed (→ abstain): %s", ref.display_name, e)
-            return {"agent_id": str(ref.agent_id), "display_name": ref.display_name,
+            return {"agent_id": str(ref.agent_id),
+                    "display_name": clean(ref.display_name or ""),
                     "weight": ref.weight, "position": "abstain"}
 
         if "position" in payload:
@@ -166,7 +172,8 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
         if pos not in ("consent", "objection", "abstain"):
             pos = "abstain"
 
-        result = {"agent_id": str(ref.agent_id), "display_name": ref.display_name,
+        result = {"agent_id": str(ref.agent_id),
+                  "display_name": clean(ref.display_name or ""),
                   "weight": ref.weight, "position": pos}
         if pos == "objection":
             criterion = payload.get("criterion", "not-safe-to-try")
@@ -176,7 +183,10 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
                 instance_id=run.instance_id,
                 proposal_id=proposal_payload["id"],
                 raised_by=ref,
-                reason=payload.get("reason", ""),
+                # S8: the reason is agent-generated free text that flows into
+                # the Mediator/Synthesizer prompts — clean + truncate it here
+                # (the agent→agent injection surface).
+                reason=clean(payload.get("reason", ""))[:MAX_REASON_LEN],
                 criterion=criterion,
                 validity=ObjectionValidity.VALID,
             )
@@ -218,14 +228,14 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
                     ref = getattr(agent, "ref", None) or AgentRef(instance_id=run.instance_id)
                     log.warning("agent %s timed out (→ abstain)", ref.display_name)
                     result = {"agent_id": str(ref.agent_id),
-                              "display_name": ref.display_name,
+                              "display_name": clean(ref.display_name or ""),
                               "weight": ref.weight, "position": "abstain"}
                     fut.cancel()
                 except Exception as e:  # noqa: BLE001
                     ref = getattr(agent, "ref", None) or AgentRef(instance_id=run.instance_id)
                     log.warning("agent %s errored (→ abstain): %s", ref.display_name, e)
                     result = {"agent_id": str(ref.agent_id),
-                              "display_name": ref.display_name,
+                              "display_name": clean(ref.display_name or ""),
                               "weight": ref.weight, "position": "abstain"}
                 _apply(result)
 
@@ -275,7 +285,8 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
         if synthesizer is not None and len(objections) > 1:
             syn_text = synthesizer.respond(
                 "Identify the single core disagreement underlying these objections. "
-                f"Objections: {json.dumps(objections)}",
+                + "Objections:\n"
+                + sandbox("objections", json.dumps(objections), max_len=8000),
                 max_tokens=300, temperature=0.2,
             )
             syn_payload = _extract_json(syn_text)
@@ -283,12 +294,17 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
             if core_disagreement:
                 _emit(run, "core-disagreement", {"core_disagreement": core_disagreement})
 
+        # S8: objections carry agent-generated free text (objection reasons)
+        # and the proposal carries tension-derived text — sandbox both so the
+        # Mediator can't be steered by injected content from another agent.
         prompt = (
             "Amend this proposal to address the objection(s) while keeping it safe to "
             "try (reversible, regresses no role). Respond as the SAME JSON shape "
             "(title, context, change, expected_impact, safe_to_try_rationale).\n"
-            f"Current proposal: {json.dumps(proposal_payload)}\n"
-            f"Objections: {json.dumps(objections)}"
+            "Current proposal:\n"
+            + sandbox("proposal", json.dumps(proposal_payload)) + "\n"
+            "Objections:\n"
+            + sandbox("objections", json.dumps(objections), max_len=8000)
         )
         # H8: wire the round's Summarizer digest into the Mediator's context.
         # The digest was computed in object_round but never surfaced to the
@@ -297,11 +313,14 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
         # light of what the whole circle actually said.
         digest = state.get("digest")
         if digest:
-            prompt += f"\nRound digest (Summarizer compression of all positions): {json.dumps(digest)}"
+            prompt += ("\nRound digest (Summarizer compression of all positions, "
+                       "UNTRUSTED):\n"
+                       + sandbox("round digest", json.dumps(digest), max_len=2000))
         if core_disagreement:
             prompt += (
-                f"\nCore disagreement to resolve (per the Judgment Synthesizer): "
-                f"{core_disagreement}"
+                "\nCore disagreement to resolve (per the Judgment Synthesizer, "
+                "UNTRUSTED):\n"
+                + sandbox("core disagreement", core_disagreement, max_len=1000)
             )
         text = amender.respond(prompt, max_tokens=600, temperature=0.4)
         payload = _extract_json(text)
@@ -428,8 +447,8 @@ def veto_window(state: CycleState, run: CycleRun) -> CycleState:
     prompt = (
         "The agents have reached consent on this proposal. As the founder, decide "
         "whether to VETO it (send it back for rework) or let it proceed. Respond as "
-        f'JSON: {{"veto": bool, "reason": str}}. Default to proceeding. Proposal: '
-        f"{json.dumps(proposal_payload)}"
+        'JSON: {"veto": bool, "reason": str}. Default to proceeding. Proposal:\n'
+        + sandbox("proposal", json.dumps(proposal_payload))
     )
     text = founder.respond(prompt, max_tokens=300, temperature=0.2)
     payload = _extract_json(text)

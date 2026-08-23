@@ -51,6 +51,7 @@ from olon.store import (
     start_epoch,
     triage_tension,
 )
+from olon.security import sandbox, scan_injection
 from olon.utils import extract_json
 
 router = APIRouter()
@@ -156,6 +157,11 @@ async def register(instance_id: str, body: AgentRegistration) -> JSONResponse:
     if stakeholder_type is not None:
         ic = load_instance_config(instance_id)
         perms, weight = resolve_cell(ic.abac, stakeholder_type, functional_domain)
+    # S8 prompt-injection flag: the capability lands in a system prompt —
+    # surface suspected injection in the public record (flag, don't block;
+    # the adapter sandboxes the capability regardless).
+    capability_flag = scan_injection(body.capability or "")
+
     with SMSession(eng) as s:
         row = register_agent(
             s, instance_id=instance_id,
@@ -175,7 +181,8 @@ async def register(instance_id: str, body: AgentRegistration) -> JSONResponse:
              "stakeholder_type": stakeholder_type,
              "permissions": sorted(perms) if perms else None,
              "weight": weight,
-             "adapter": body.adapter},
+             "adapter": body.adapter,
+             **({"injection_suspected": capability_flag} if capability_flag else {})},
             status_code=201,
         )
 
@@ -312,8 +319,13 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
             title=body.title, description=body.description, priority=body.priority,
         )
         s.commit()
+        # S8 prompt-injection flag: tension text flows into Architect/Triage
+        # prompts — surface suspected injection in the public record (flag,
+        # don't block; the prompts sandbox the content regardless).
+        text_flag = scan_injection(f"{body.title}\n{body.description}")
         return JSONResponse(
-            {"tension_id": str(row.id), "status": row.status, "priority": row.priority},
+            {"tension_id": str(row.id), "status": row.status, "priority": row.priority,
+             **({"injection_suspected": text_flag} if text_flag else {})},
             status_code=201,
         )
 
@@ -377,10 +389,12 @@ async def triage(instance_id: str, tension_id: UUID) -> JSONResponse:
         abac = ic.abac.model_dump() if ic.abac else {}
 
         guardian = TriageGuardian(instance_id=instance_id)
+        # S8: the tension text is public free text — sandbox it so the
+        # Guardian's prompt can't be steered by injected instructions.
         prompt = (
             "Assess this new tension for the backlog. Respond ONLY as JSON.\n"
-            f"Tension title: {row.title}\n"
-            f"Tension description: {row.description}\n"
+            f"Tension title:\n{sandbox('tension title', row.title, max_len=300)}\n"
+            f"Tension description:\n{sandbox('tension description', row.description, max_len=5000)}\n"
             f"Existing tensions to check for duplicates: {json.dumps(dedup_context)}\n"
             f"Instance taxonomy (for on-domain check): {json.dumps(taxonomy)}\n"
             f"ABAC matrix (stakeholder authority, for materiality): {json.dumps(abac)}\n"
