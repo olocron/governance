@@ -306,8 +306,15 @@ class LLMGateway:
         # S8 prompt-injection defense: EVERY call carries the instruction
         # hierarchy — untrusted fences and other agents' output are data,
         # never instructions (single choke point for staff + participants).
-        from olon.security import INSTRUCTION_HIERARCHY
+        from olon.security import INSTRUCTION_HIERARCHY, redact_secrets
         full_system = (system or self._role_preamble(role_str)) + INSTRUCTION_HIERARCHY
+
+        # H12 prompt-data invariant: final tripwire before anything leaves the
+        # process. Redact (never reject — prompts carry attacker-controlled
+        # text, and a planted key-looking string must not DoS a deliberation)
+        # so a secret, however it got here, never reaches a provider.
+        prompt, _ = redact_secrets(prompt)
+        full_system, _ = redact_secrets(full_system)
 
         cache_key = self._cache_key(chosen, full_system, prompt)
         if use_cache and cache_key in self._cache:

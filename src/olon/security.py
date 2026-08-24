@@ -31,11 +31,48 @@ Defense layers provided here:
   injection phrasing; used at intake to FLAG (not block) suspect payloads
   into the public record (holacracy: flags are visible, decisions stay
   with the humans/protocol).
+
+H12 adds the prompt-data invariant and its enforcement:
+
+- `PROMPT_DATA_INVARIANT` — the design rule (see below).
+- `scan_secrets(text)` / `redact_secrets(text)` — a tripwire for
+  secret-shaped strings (private keys, provider keys, bearer tokens,
+  credentialed DB URLs). Enforcement REDACTS rather than rejects: prompts
+  carry attacker-controlled text (tension descriptions), and rejecting on a
+  fake `sk-...` planted in a tension would hand an attacker a
+  deliberation-DoS. Redaction holds the invariant (the secret never reaches
+  a provider or federated endpoint) while the cycle proceeds; a genuine leak
+  from OUR code still logs loudly and lands in the redaction counters.
+  Wired at every prompt choke point: `sandbox()`, `LLMGateway.call_agent`,
+  and `EndpointAdapter.respond` (federation is the exfiltration channel by
+  construction — every self-hosted endpoint agent receives the prompt
+  verbatim).
 """
 
 from __future__ import annotations
 
+import logging
 import re
+
+log = logging.getLogger(__name__)
+
+# ── The prompt-data invariant (H12) ──────────────────────────────────────────
+#
+# THE rule: nothing the platform wouldn't publish goes into any prompt.
+# Prompts may carry only public-record data (tensions, proposals, positions,
+# assessments, themes). Secrets — provider keys, the founder token, database
+# URLs, un-attested registrants' contact details, internal notes — never
+# enter a prompt, because federation broadcasts every prompt verbatim to
+# every endpoint agent: a self-hosted participant IS an exfiltration channel
+# by construction. docs/SECURITY.md carries the operational version.
+
+PROMPT_DATA_INVARIANT = (
+    "Nothing the platform wouldn't publish goes into any prompt. Prompts "
+    "contain only public-record data (tensions, proposals, positions, "
+    "assessments). Secrets never enter prompts — every prompt is broadcast "
+    "verbatim to every federated endpoint agent, so any secret in a prompt "
+    "is a secret disclosed to every participant."
+)
 
 # ── Fences ────────────────────────────────────────────────────────────────────
 # Deliberately bracketed so they read as structure, not prose. The exact
@@ -82,6 +119,9 @@ def sandbox(label: str, text: str, *, max_len: int | None = None) -> str:
     - The fence markers are removed from the content first, so an attacker
       cannot close the real fence and open a fake one.
     - Control/invisible characters are stripped (clean()).
+    - Secret-shaped strings are redacted (H12: the prompt-data invariant
+      holds even when untrusted content plants key-looking text — and this
+      is also the depth layer behind the transport-level tripwires).
     - Optionally truncated (use for fields re-fed into other prompts).
 
     Use at every sink where untrusted or agent-generated free text is
@@ -90,6 +130,7 @@ def sandbox(label: str, text: str, *, max_len: int | None = None) -> str:
     if text is None:
         text = ""
     text = clean(str(text))
+    text, _matched = redact_secrets(text)
     if max_len is not None and len(text) > max_len:
         text = text[:max_len] + "…[truncated]"
     # Neutralize any attempt to forge or escape the fences.
@@ -134,10 +175,78 @@ def scan_injection(text: str) -> str | None:
     return None
 
 
+# ── Secrets-in-prompts tripwire (H12) ────────────────────────────────────────
+#
+# Deliberately tight patterns for unambiguous secret SHAPES. Generic secret
+# detection is impossible (any string might be a password); this is a
+# tripwire for the realistic leak classes, not a DLP product. False
+# positives are cheap (a redaction) and attacker-planted matches are
+# harmless (their junk gets redacted — no DoS, unlike a rejection).
+
+_SECRET_PATTERNS: list[tuple[str, str]] = [
+    # PEM blocks span multiple lines — match BEGIN...END as one unit so the
+    # key BODY is redacted too, not just the header line.
+    (r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----"
+     r"[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
+     "private-key"),
+    # A BEGIN with no END (truncated/pasted key body) still redacts to EOL.
+    (r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----[^\n]*",
+     "private-key-fragment"),
+    (r"\bsk-[A-Za-z0-9_-]{16,}\b", "api-key"),
+    (r"\bAKIA[0-9A-Z]{16}\b", "aws-access-key"),
+    (r"\bgh[pousr]_[A-Za-z0-9]{36,}\b", "github-token"),
+    (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "slack-token"),
+    (r"\bBearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}", "bearer-token"),
+    # DB URLs with inline credentials: postgres://user:pass@host
+    (r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?)://[^\s:@/]+:[^\s@]+@",
+     "db-url-credentials"),
+]
+_SECRET_COMPILED = [(re.compile(p, re.IGNORECASE), name) for p, name in _SECRET_PATTERNS]
+
+
+def scan_secrets(text: str) -> list[str]:
+    """Return the names of every secret pattern that matches `text` (empty if
+    none). Case-insensitive over the cleaned text."""
+    if not text:
+        return []
+    text = clean(text)
+    return [name for rx, name in _SECRET_COMPILED if rx.search(text)]
+
+
+def redact_secrets(text: str) -> tuple[str, list[str]]:
+    """Replace every secret-shaped substring in `text` with a labelled
+    redaction marker. Returns (redacted_text, matched_pattern_names).
+
+    Log order is ERROR because a genuine match means a secret was about to
+    flow into a prompt — the prompt-data invariant (H12) — and the redaction
+    is the last line of defence, not the first. The logged text is never
+    included, only the pattern names (logging the secret would itself be a
+    leak into log aggregation).
+    """
+    if not text:
+        return text, []
+    redacted = clean(text)
+    matched: list[str] = []
+    for rx, name in _SECRET_COMPILED:
+        redacted, n = rx.subn(f"[redacted:{name}]", redacted)
+        if n:
+            matched.append(name)
+    if matched:
+        log.error(
+            "H12 prompt-data invariant: redacted secret-shaped content "
+            "(patterns=%s) before it reached a prompt sink",
+            matched,
+        )
+    return redacted, matched
+
+
 __all__ = [
     "INSTRUCTION_HIERARCHY",
     "MAX_REASON_LEN",
+    "PROMPT_DATA_INVARIANT",
     "clean",
+    "redact_secrets",
     "sandbox",
     "scan_injection",
+    "scan_secrets",
 ]

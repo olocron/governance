@@ -49,10 +49,22 @@ class EndpointAdapter(AgentAdapter):
         kwargs forwarded: max_tokens, temperature (the endpoint may honour them).
         Raises httpx.HTTPStatusError on a non-200, or ValueError on a malformed
         body — the cycle catches these and defaults the agent to abstain.
+
+        H12 prompt-data invariant: federation is a data-exfiltration channel
+        BY CONSTRUCTION — the endpoint operator receives the prompt verbatim.
+        Secret-shaped content is redacted from prompt/system/context before
+        the POST (redact, not reject: prompts carry attacker-controlled text,
+        and a planted key-looking string must not DoS the deliberation).
         """
+        from olon.security import redact_secrets
+
+        prompt, _ = redact_secrets(prompt)
+        system, _ = redact_secrets(self.system_prompt)
+        context, _ = redact_secrets(context)
+
         body = {
             "prompt": prompt,
-            "system": self.system_prompt,
+            "system": system,
             "context": context,
         }
         if "max_tokens" in kwargs:
