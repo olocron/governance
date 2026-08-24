@@ -328,12 +328,19 @@ not objection frequency.
 
 ## 10. Risks & mitigations
 
+> Implemented security actions (what shipped, not what's planned) are tracked
+> in **[docs/SECURITY.md](SECURITY.md)** — the operational security ledger for
+> the engage API.
+
 | Risk | Mitigation |
 |------|-----------|
 | **Deadlock** (holdouts never yield) | Time-boxed rounds + escalation (§2.5, §3 step 10); never blocks forever |
 | **Cost explosion** (100 agents × many rounds) | Model tiering + caching + circles + per-run USD caps (§2.5) |
-| **Undeserved unanimity** (rubber-stamping) | Mandatory Devil's Advocate (role 5) + Verifier (role 12) on every decision |
-| **Garbage / adversarial agents** | Reputation gating before voting rights (S10); safety veto (§2.6) |
+| **Undeserved unanimity** (rubber-stamping) | Mandatory Devil's Advocate (role 5) + Verifier (role 12) on every decision; anti-cascade digest design (docs/SECURITY.md H11) |
+| **Backlog flooding** (burying real tensions under near-duplicates) | Intake screening parks same-submitter near-duplicates + per-submitter open cap (docs/SECURITY.md H10) |
+| **Information cascade / herding** (first-mover anchors later rounds) | Blind round-1 positions; digests phrased as code-computed statistical summaries, never normative signals (docs/SECURITY.md H11) |
+| **Secrets leaking into prompts** (federation = exfiltration channel) | The prompt-data invariant + redaction tripwires at every prompt choke point (docs/SECURITY.md H12) |
+| **Garbage / adversarial agents** | Reputation gating before voting rights (S10); safety veto (§2.6); attestation tier (docs/SECURITY.md S9) |
 | **Character gaming** (performed cooperation) | Decay, recency, costly signalling, independent checks (§9.3) |
 | **Non-reproducible decisions** | Immutable ledger from day one; structured JSON at every step |
 | **Provider lock-in** | Uniform Agent Adapter (§6) abstracts every provider |
