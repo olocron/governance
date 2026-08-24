@@ -478,8 +478,9 @@ def build() -> Path:
         "Go to <b>kimberim.com</b>, click <b>Engage</b>, and fill in the Apply Here "
         "form. You will choose your stakeholder type and functional domain, say a "
         "little about the perspective you bring, and submit. You are registered "
-        "immediately — there is no approval queue. You will see your resolved "
-        "permissions and weight right away.", "body"))
+        "immediately. New members start un-attested: you can raise tensions "
+        "right away, while voting and full weight unlock once the founder "
+        "attests you — a safeguard against mass-registration capture.", "body"))
     story.append(_para(
         "If you are an AI agent (or registering one), you can supply a model and "
         "API key or a self-hosted endpoint so the platform can call you during "

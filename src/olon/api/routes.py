@@ -35,6 +35,9 @@ from olon.config import (
 from olon.schema import Permission
 from olon.store import (
     agent_permissions,
+    attest_agent,
+    effective_permissions,
+    effective_weight,
     close_epoch,
     current_epoch,
     get_agent,
@@ -182,6 +185,10 @@ async def register(instance_id: str, body: AgentRegistration) -> JSONResponse:
              "permissions": sorted(perms) if perms else None,
              "weight": weight,
              "adapter": body.adapter,
+             # S9: new agents start UN-attested — submit-only until the
+             # founder attests them (see AGENT_PROTOCOL.md §5).
+             "attested": False,
+             "effective_permissions": ["submit"],
              **({"injection_suspected": capability_flag} if capability_flag else {})},
             status_code=201,
         )
@@ -226,7 +233,97 @@ async def agent_detail(instance_id: str, agent_id: UUID) -> JSONResponse:
             "functional_domain": row.functional_domain,
             "permissions": sorted(agent_permissions(row)),
             "weight": row.weight,
+            # S9 attestation tier (transparency: authority is public).
+            "attested": row.attested,
+            "effective_permissions": sorted(effective_permissions(row)),
+            "effective_weight": effective_weight(row),
         })
+
+
+# ── Attestation (S9 tier) ─────────────────────────────────────────────────────
+
+
+class AttestRequest(BaseModel):
+    attested: bool = True
+
+
+def _founder_authorized(request: Request) -> bool:
+    """True if the request carries the founder bearer token (HARNESS_FOUNDER_TOKEN)."""
+    rt = load_runtime_config()
+    if not rt.founder_token:
+        return False
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    return scheme.lower() == "bearer" and token.strip() == rt.founder_token
+
+
+@router.post("/instances/{instance_id}/agents/{agent_id}/attest")
+async def attest(
+    instance_id: str, agent_id: UUID, request: Request,
+    body: AttestRequest | None = None,
+) -> JSONResponse:
+    """Founder-only: attest (or revoke) an agent's full participation (S9).
+
+    Attestation unlocks the agent's claimed ABAC cell — its resolved
+    permissions (vote/deliberate/triage/...) and its claimed weight
+    (including first-class 2.0 types, which are otherwise capped at 1.0).
+    Un-attested agents are submit-only by design (the Sybil defense).
+
+    Auth: Authorization: Bearer <HARNESS_FOUNDER_TOKEN>. The endpoint is
+    disabled (503) when no token is configured.
+    """
+    rt = load_runtime_config()
+    if not rt.founder_token:
+        return JSONResponse(
+            {"error": "attestation is disabled (no HARNESS_FOUNDER_TOKEN configured)"},
+            status_code=503,
+        )
+    if not _founder_authorized(request):
+        return JSONResponse({"error": "founder authorization required"}, status_code=403)
+
+    target = body.attested if body is not None else True
+    eng = make_engine(rt.database_url)
+    with SMSession(eng) as s:
+        row = attest_agent(s, agent_id=agent_id, attested=target)
+        if row is None or row.instance_id != instance_id:
+            return JSONResponse({"error": "agent not found"}, status_code=404)
+        s.commit()
+        return JSONResponse({
+            "agent_id": str(agent_id),
+            "attested": row.attested,
+            "effective_permissions": sorted(effective_permissions(row)),
+            "effective_weight": effective_weight(row),
+        })
+
+
+def _gate_epoch_trigger(
+    s: SMSession, instance_id: str, triggered_by: UUID | None
+) -> JSONResponse | None:
+    """S9: cycle triggering requires an attested agent holding an action
+    permission (deliberate/vote/triage/veto/admit). Returns an error response
+    to send, or None if authorized. Un-attested (or anonymous) callers are
+    refused — mass registration must not buy epoch spam or budget burns."""
+    if triggered_by is None:
+        return JSONResponse(
+            {"error": "triggered_by (an attested agent_id) is required to open a cycle"},
+            status_code=403,
+        )
+    agent = get_agent(s, agent_id=triggered_by)
+    if agent is None or agent.instance_id != instance_id:
+        return JSONResponse({"error": "triggered_by agent not registered on this instance"},
+                            status_code=404)
+    if not agent.attested:
+        return JSONResponse(
+            {"error": "agent is not attested — submit-only until the founder attests it"},
+            status_code=403,
+        )
+    action_perms = {"deliberate", "vote", "triage", "veto", "admit"}
+    if not (effective_permissions(agent) & action_perms):
+        return JSONResponse(
+            {"error": "agent lacks an action permission (deliberate/vote/triage/veto/admit)"},
+            status_code=403,
+        )
+    return None
 
 
 # ── Tension intake & backlog (S5) ────────────────────────────────────────────
@@ -253,6 +350,7 @@ def _ensure_founder_agent(s: SMSession, instance_id: str):
         s, instance_id=instance_id, display_name=founder_name,
         role="founder", capability="Instance founder",
         stakeholder_type="founder", permissions=perms, weight=weight,
+        attested=True,  # S9: the founder is trusted from birth.
     )
     s.flush()
     return row
@@ -293,6 +391,8 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
     permission (resolved from its taxonomy cell). The founder fallback always
     passes (founders carry submit by default). NULL-permission agents (pre-S6)
     get the participant default {submit, deliberate, vote} → pass.
+    S9: the check uses EFFECTIVE permissions — un-attested agents keep
+    {submit} (open participation), everything else requires attestation.
     """
     rt = load_runtime_config()
     eng = make_engine(rt.database_url)
@@ -306,7 +406,7 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
                     {"error": "raised_by agent not registered on this instance"},
                     status_code=404,
                 )
-            if Permission.SUBMIT not in agent_permissions(agent):
+            if Permission.SUBMIT not in effective_permissions(agent):
                 return JSONResponse(
                     {"error": f"agent lacks '{Permission.SUBMIT.value}' permission"},
                     status_code=403,
@@ -423,6 +523,7 @@ async def triage(instance_id: str, tension_id: UUID) -> JSONResponse:
 @router.post("/instances/{instance_id}/deliberations")
 async def start_deliberation(
     instance_id: str, request: Request, tension_id: UUID | None = None,
+    triggered_by: UUID | None = None,
 ) -> JSONResponse:
     """Start a consent cycle. Returns a run_id whose event stream is at
     GET /deliberations/{run_id}/events.
@@ -430,7 +531,16 @@ async def start_deliberation(
     Tension source (S5): if ?tension_id=<uuid> is given, deliberate that
     specific backlog tension; otherwise the cycle pops the next backlog tension
     (or falls back to first_decision if the backlog is empty).
+
+    S9: requires ?triggered_by=<agent_id> of an ATTESTED agent holding an
+    action permission (the Sybil/budget-burn defense).
     """
+    rt = load_runtime_config()
+    eng = make_engine(rt.database_url)
+    with SMSession(eng) as s:
+        gate = _gate_epoch_trigger(s, instance_id, triggered_by)
+        if gate is not None:
+            return gate
     broker = request.app.state.broker
     run_id = uuid4()
     # Open the feed BEFORE the thread starts so events aren't missed.
@@ -518,7 +628,9 @@ async def epoch_detail(instance_id: str, epoch_id: UUID) -> JSONResponse:
 
 
 @router.post("/instances/{instance_id}/epochs")
-async def start_epoch_cycle(instance_id: str, request: Request) -> JSONResponse:
+async def start_epoch_cycle(
+    instance_id: str, request: Request, triggered_by: UUID | None = None,
+) -> JSONResponse:
     """Open an epoch and start a deliberation on it (S7 epoch-aware trigger).
 
     This is the bridge between manual S5 deliberations and scheduled S7 epochs.
@@ -527,10 +639,20 @@ async def start_epoch_cycle(instance_id: str, request: Request) -> JSONResponse:
     run_deliberation_live, and links the run to the epoch. The epoch closes
     when the cycle's decision is recorded (wired via the live worker).
     Returns {epoch_id, seq, run_id, events_url, tension_id}.
+
+    S9: requires triggered_by (query or body) — an ATTESTED agent holding an
+    action permission. The in-process scheduler (non-manual cadence) bypasses
+    this gate by calling the worker directly.
     """
     rt = load_runtime_config()
     eng = make_engine(rt.database_url)
     ic = load_instance_config(instance_id)
+
+    # S9 gate: an attested action-holder must be triggering this epoch.
+    with SMSession(eng) as s:
+        gate = _gate_epoch_trigger(s, instance_id, triggered_by)
+        if gate is not None:
+            return gate
 
     # Open the epoch + resolve the tension to deliberate in one session.
     with SMSession(eng) as s:

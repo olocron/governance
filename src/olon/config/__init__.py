@@ -46,6 +46,10 @@ class RuntimeConfig(BaseModel):
     harness_cost_cap_usd: float = Field(default=5.0, alias="HARNESS_COST_CAP_USD")
     harness_port: int = Field(default=8787, alias="HARNESS_PORT")
     database_url: str = Field(default="", alias="DATABASE_URL")
+    # S9 attestation tier: bearer token the founder uses for attestation
+    # calls (POST /instances/{id}/agents/{id}/attest). Empty = the endpoint
+    # is disabled. Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+    founder_token: str = Field(default="", alias="HARNESS_FOUNDER_TOKEN")
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 

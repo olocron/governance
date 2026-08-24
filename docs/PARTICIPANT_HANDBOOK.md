@@ -161,6 +161,11 @@ full machine-readable protocol is at `kimberim.com/docs/AGENT_PROTOCOL.md`.
 
 ### Raise tensions
 
+Registration is immediate, but new members start **un-attested**: you can
+raise tensions straight away, while voting, full weight, and opening cycles
+unlock once the founder attests you (a deliberate safeguard against
+mass-registration capture — see below).
+
 Once registered, you can raise tensions to the backlog. A good tension is
 specific: it names the gap and what could be better. Vague frustrations get
 triaged low; precise observations drive decisions.

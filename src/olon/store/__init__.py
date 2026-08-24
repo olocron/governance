@@ -70,6 +70,11 @@ class AgentRegistryRow(SQLModel, table=True):
     # S7 federation transport hint: "provider" (platform-proxy) | "endpoint"
     # (self-hosted). NULL = auto-detect from model/endpoint at adapter build.
     adapter: str | None = None
+    # S9 attestation tier: FALSE until the founder attests the agent.
+    # Un-attested = submit-only (can raise tensions, cannot vote/deliberate
+    # on the platform gateway, cannot trigger epochs, claimed weight capped
+    # at 1.0). Founder rows are attested from birth.
+    attested: bool = Field(default=False)
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -280,6 +285,7 @@ def register_agent(
     functional_domain: str | None = None,
     permissions: set[str] | None = None,
     adapter: str | None = None,
+    attested: bool = False,
 ) -> AgentRegistryRow:
     """Register an external/participant agent (ROADMAP §6 'Welcome an Agent').
 
@@ -292,6 +298,10 @@ def register_agent(
     the instance's ABACMatrix (via olon.config.resolve_cell) and passes both
     the taxonomy cell and the resolved permissions — store stays YAML-free.
     weight is the caller's call too (defaults 1.0 preserves back-compat).
+
+    S9 attestation: new agents are UN-attested by default (submit-only,
+    weight capped at 1.0, no platform-gateway participation, no epoch
+    triggering) until the founder attests them. Founder rows pass True.
     """
     row = AgentRegistryRow(
         instance_id=instance_id,
@@ -307,6 +317,7 @@ def register_agent(
         functional_domain=functional_domain,
         permissions=json.dumps(sorted(permissions)) if permissions else None,
         adapter=adapter,
+        attested=attested,
     )
     session.add(row)
     session.flush()
@@ -341,6 +352,48 @@ def agent_permissions(row: AgentRegistryRow | None) -> set[str]:
 def get_agent(session: SMSession, *, agent_id: UUID) -> AgentRegistryRow | None:
     """Fetch a single registered agent by id (None if absent)."""
     return session.get(AgentRegistryRow, agent_id)
+
+
+def attest_agent(
+    session: SMSession, *, agent_id: UUID, attested: bool
+) -> AgentRegistryRow | None:
+    """Set an agent's attestation flag (founder action, S9). None if absent."""
+    row = session.get(AgentRegistryRow, agent_id)
+    if row is None:
+        return None
+    row.attested = attested
+    session.add(row)
+    session.flush()
+    return row
+
+
+def effective_permissions(row: AgentRegistryRow | None) -> set[str]:
+    """The permissions that ACTUALLY apply at runtime (S9 attestation tier).
+
+    Un-attested agents are submit-only — they can raise tensions (open
+    participation, soft-gated by triage) but cannot vote, deliberate via the
+    platform gateway, or trigger epochs. This is the Sybil defense: mass
+    registration buys nothing but the right to be triaged.
+
+    Attested agents get their full resolved ABAC cell (agent_permissions).
+    """
+    if row is None:
+        return {"submit"}  # an unknown agent can still raise (founder fallback)
+    if not row.attested:
+        return {"submit"}
+    return agent_permissions(row)
+
+
+def effective_weight(row: AgentRegistryRow | None) -> float:
+    """The weight that ACTUALLY applies in consent tallies (S9).
+
+    Un-attested agents are capped at 1.0 — a self-claimed 'traditional-owners'
+    or 'founder' type carries no first-class weight until the founder attests
+    the claim. Attested agents carry their resolved weight.
+    """
+    if row is None or not row.attested:
+        return 1.0
+    return row.weight
 
 
 # ── Tension backlog CRUD (S5) ────────────────────────────────────────────────

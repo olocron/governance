@@ -26,6 +26,8 @@ const EVENT_LABELS = {
   "veto-override": "Veto override",
   escalation: "Escalation",
   "decision-recorded": "Decision recorded",
+  "attestation-required": "Attestation required",
+  "info": "Info",
 };
 
 function eventDetail(type, payload) {
@@ -121,15 +123,33 @@ $("register-form").addEventListener("submit", async (e) => {
 });
 
 // ── Start deliberation + stream live ───────────────────────────
+// S9: opening a cycle requires an ATTESTED agent id (triggered_by). An
+// anonymous/un-attested visitor gets a clear explanation instead of a raw 403.
 $("start-btn").addEventListener("click", async () => {
   feedEl.innerHTML = "";
   outcomeEl.hidden = true;
   const btn = $("start-btn");
+  const triggeredBy = ($("trigger-id") ? $("trigger-id").value.trim() : "");
   btn.disabled = true;
   btn.textContent = "Deliberating…";
   try {
-    const r = await fetch(`/instances/${INSTANCE}/deliberations`, { method: "POST" });
-    const data = await r.json();
+    const qs = triggeredBy ? `?triggered_by=${encodeURIComponent(triggeredBy)}` : "";
+    const r = await fetch(`/instances/${INSTANCE}/deliberations${qs}`, { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const reason = data.error || `HTTP ${r.status}`;
+      appendEvent(r.status === 403 ? "attestation-required" : "error", { reason });
+      if (r.status === 403) {
+        appendEvent("info", {
+          reason: "Register an agent (it can raise tensions immediately), then ask " +
+                  "the founder to attest it for full participation — see the " +
+                  "Agent Protocol link below.",
+        });
+      }
+      btn.disabled = false;
+      btn.textContent = "Start deliberation";
+      return;
+    }
     subscribe(data.events_url);
   } catch (err) {
     btn.disabled = false;

@@ -27,6 +27,26 @@ INSTANCE = "kimberim"
 _HAS_LIVE = bool(os.getenv("ZAI_API_KEY") and os.getenv("DATABASE_URL"))
 
 
+def _attested_trigger(client) -> str:
+    """S9: register + attest a staff agent; returns its agent_id (authorized
+    to trigger cycles). Uses the store directly for the attestation (the
+    HTTP attest route needs the founder token, absent in dev .env)."""
+    from sqlmodel import Session as SMSession
+    from olon.config import load_runtime_config
+    from olon.store import attest_agent, make_engine, register_agent
+    reg = client.post(f"/instances/{INSTANCE}/agents", json={
+        "display_name": f"live-trigger-{time.time():.0f}",
+        "stakeholder_type": "staff",
+    })
+    assert reg.status_code == 201
+    aid = reg.json()["agent_id"]
+    rt = load_runtime_config()
+    with SMSession(make_engine(rt.database_url)) as s:
+        attest_agent(s, agent_id=aid, attested=True)
+        s.commit()
+    return aid
+
+
 @pytest.mark.live
 @pytest.mark.skipif(not _HAS_LIVE, reason="needs ZAI_API_KEY + DATABASE_URL")
 def test_live_welcome_and_watch_deliberation():
@@ -46,7 +66,9 @@ def test_live_welcome_and_watch_deliberation():
     assert reg.json()["status"] == "registered"
 
     # 2. Start a deliberation.
-    start = client.post(f"/instances/{INSTANCE}/deliberations")
+    start = client.post(
+        f"/instances/{INSTANCE}/deliberations?triggered_by={_attested_trigger(client)}"
+    )
     assert start.status_code == 202
     run_id = start.json()["run_id"]
     events_url = start.json()["events_url"]
@@ -112,7 +134,10 @@ def test_live_submit_triage_deliberate_decide():
     tension_id = sub.json()["tension_id"]
 
     # 2. Start a deliberation targeting that specific tension.
-    start = client.post(f"/instances/{INSTANCE}/deliberations?tension_id={tension_id}")
+    start = client.post(
+        f"/instances/{INSTANCE}/deliberations?tension_id={tension_id}"
+        f"&triggered_by={_attested_trigger(client)}"
+    )
     assert start.status_code == 202
     run_id = start.json()["run_id"]
     events_url = start.json()["events_url"]
@@ -171,7 +196,9 @@ def test_live_epoch_opens_deliberates_and_closes():
     client = TestClient(create_app())
 
     # 1. Open an epoch + start the deliberation.
-    start = client.post(f"/instances/{INSTANCE}/epochs")
+    start = client.post(
+        f"/instances/{INSTANCE}/epochs?triggered_by={_attested_trigger(client)}"
+    )
     if start.status_code == 409:
         pytest.skip("an epoch is already running in the shared dev DB; retry later")
     assert start.status_code == 202
@@ -259,7 +286,10 @@ def test_live_federated_agent_participates():
     assert sub.status_code == 201
     tension_id = sub.json()["tension_id"]
 
-    start = client.post(f"/instances/{INSTANCE}/deliberations?tension_id={tension_id}")
+    start = client.post(
+        f"/instances/{INSTANCE}/deliberations?tension_id={tension_id}"
+        f"&triggered_by={_attested_trigger(client)}"
+    )
     assert start.status_code == 202
     run_id = start.json()["run_id"]
     events_url = start.json()["events_url"]

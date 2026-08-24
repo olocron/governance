@@ -69,24 +69,44 @@ def _ensure_founder(s, instance_id: str, instance: InstanceConfig):
         s, instance_id=instance_id, display_name=founder_name,
         role="founder", capability="Instance founder",
         stakeholder_type="founder", permissions=perms, weight=weight,
+        attested=True,  # S9: the founder is trusted from birth.
     )
     s.flush()
     return row.agent_id
 
 
 def _participant_agent(row, instance_id: str):
-    """Build a participant agent from a registered agent's row (S7 federation).
+    """Build a participant agent from a registered agent's row (S7 federation
+    + S9 attestation tier).
 
     Delegates to make_adapter, which picks the transport from the row's fields:
       - provider (platform-proxy): the agent runs on its own registered provider.
       - endpoint (self-hosted): the platform POSTs to the agent's HTTPS endpoint.
-      - platform fallback: the agent runs on the platform's own Z.ai gateway
-        (back-compat for bare / pre-S7 registrations).
+      - platform fallback: the agent runs on the platform's own Z.ai gateway.
 
-    The row's ABAC-resolved weight flows into the AgentRef.
+    S9 rules:
+      - UN-ATTESTED agents may ONLY join via their own transport (provider
+        key or endpoint). A bare un-attested agent would ride the platform's
+        gateway on the platform's budget — the economic-DoS vector — so it
+        is excluded from the cycle (returns None).
+      - UN-ATTESTED agents carry effective weight 1.0 regardless of their
+        claimed stakeholder type (first-class 2.0 needs attestation).
     """
     from olon.agents.adapter import make_adapter
-    return make_adapter(row, instance_id=instance_id, weight=row.weight)
+    from olon.store import effective_weight
+
+    own_transport = bool(
+        getattr(row, "adapter", None) == "endpoint" and row.endpoint
+    ) or bool(row.model and row.api_key_enc)
+    if not row.attested and not own_transport:
+        log.info(
+            "agent %s excluded from cycle (un-attested, no own transport) — "
+            "attest via POST /instances/%s/agents/%s/attest",
+            row.display_name, instance_id, row.agent_id,
+        )
+        return None
+    weight = effective_weight(row) if not row.attested else row.weight
+    return make_adapter(row, instance_id=instance_id, weight=weight)
 
 
 def run_deliberation_live(
@@ -149,12 +169,16 @@ def run_deliberation_live(
 
         # Registered participant agents (from the registry). S7: make_adapter
         # picks the transport (provider/endpoint/platform) from each row.
+        # S9: un-attested agents without their own transport are excluded
+        # (_participant_agent returns None) — filter them out here.
         with SMSession(eng) as s:
             registered = list_agents(s, instance_id=instance_id)
         participants = [
-            _participant_agent(a, instance_id)
+            agent
             for a in registered
             if a.display_name
+            for agent in [_participant_agent(a, instance_id)]
+            if agent is not None
         ]
 
         # ── Resolve the tension to deliberate (S5 generalization) ──────────

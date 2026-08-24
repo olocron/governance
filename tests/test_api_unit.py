@@ -159,7 +159,7 @@ def test_submit_tension_rejected_for_observe_only_agent(client):
     # to isolate the gate logic (the gate is what we're testing here).
     from sqlmodel import Session as SMSession
     from olon.config import load_runtime_config
-    from olon.store import make_engine, register_agent
+    from olon.store import attest_agent, make_engine, register_agent
     rt = load_runtime_config()
     eng = make_engine(rt.database_url)
     with SMSession(eng) as s:
@@ -167,6 +167,9 @@ def test_submit_tension_rejected_for_observe_only_agent(client):
             s, instance_id="kimberim", display_name="Observe-Only Bot",
             permissions={"observe"},  # no submit
         )
+        # S9: the ABAC cell only applies once attested — attest so the
+        # observe-only permissions (not the submit-only floor) govern.
+        attest_agent(s, agent_id=row.agent_id, attested=True)
         s.commit()
         observe_only_id = row.agent_id
 
@@ -311,6 +314,23 @@ def test_list_tensions_filtered_by_status(client):
     assert created_id not in {t["tension_id"] for t in decided}
 
 
+def _attested_trigger() -> str:
+    """S9: an attested staff agent_id authorized to trigger cycles."""
+    from sqlmodel import Session as SMSession
+    from olon.config import load_runtime_config
+    from olon.store import attest_agent, make_engine, register_agent
+    rt = load_runtime_config()
+    eng = make_engine(rt.database_url)
+    with SMSession(eng) as s:
+        row = register_agent(
+            s, instance_id="kimberim", display_name=f"trigger-{uuid4().hex[:8]}",
+            stakeholder_type="staff",
+        )
+        attest_agent(s, agent_id=row.agent_id, attested=True)
+        s.commit()
+        return str(row.agent_id)
+
+
 @pytest.mark.skipif(not _HAS_DB, reason="needs DATABASE_URL")
 def test_deliberation_targets_specific_tension(client):
     """POST .../deliberations?tension_id=<uuid> starts a cycle on that specific
@@ -325,8 +345,13 @@ def test_deliberation_targets_specific_tension(client):
     })
     tension_id = sub.json()["tension_id"]
 
-    # Start a deliberation targeting it. The worker runs in a background thread.
-    r = client.post(f"/instances/kimberim/deliberations?tension_id={tension_id}")
+    # Start a deliberation targeting it (S9: an attested agent triggers).
+    # The worker runs in a background thread.
+    trigger = _attested_trigger()
+    r = client.post(
+        f"/instances/kimberim/deliberations?tension_id={tension_id}"
+        f"&triggered_by={trigger}"
+    )
     assert r.status_code == 202
     assert r.json()["run_id"]
 
@@ -478,7 +503,7 @@ def test_post_epoch_opens_and_starts_deliberation(client):
 
     If a prior epoch is still 'running' in the shared dev DB (overlap guard),
     we accept the 409 and verify the list reflects the running epoch instead."""
-    r = client.post("/instances/kimberim/epochs")
+    r = client.post(f"/instances/kimberim/epochs?triggered_by={_attested_trigger()}")
     if r.status_code == 409:
         # Overlap guard fired — a prior epoch is running. Verify it's visible.
         r2 = client.get("/instances/kimberim/epochs?status=running")
