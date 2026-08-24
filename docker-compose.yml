@@ -42,6 +42,8 @@ services:
       ZAI_BASE_URL: ${ZAI_BASE_URL:-https://api.z.ai/api/anthropic}
       HARNESS_MODELS: ${HARNESS_MODELS:-GLM-5-Turbo}
       HARNESS_COST_CAP_USD: ${HARNESS_COST_CAP_USD:-5.0}
+      # S9: founder bearer token for the attest endpoint (empty = disabled).
+      HARNESS_FOUNDER_TOKEN: ${HARNESS_FOUNDER_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
