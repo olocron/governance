@@ -246,10 +246,19 @@ def test_submit_tension_null_permissions_back_compat(client):
 
 @pytest.mark.skipif(not _HAS_DB, reason="needs DATABASE_URL")
 def test_submit_and_list_tension(client):
-    """POST a tension → it appears in the backlog list."""
+    """POST a tension → it appears in the backlog list.
+
+    H10: the body is uuid-dominated so each run's submission is genuinely
+    dissimilar (<0.85 similarity) from prior runs' rows on the shared dev DB
+    — intake screening parks a resubmission near-identical to the SAME
+    submitter's earlier tension (a short suffix on a long fixed body stays
+    ~0.97 similar and would be parked)."""
+    u = uuid4().hex
+    title = f"Compute heat load on water supply [{u[:8]}]"
+    description = f"On-site compute raises cooling water demand. unique-{u}-{u}-{u}"
     r = client.post("/instances/kimberim/tensions", json={
-        "title": "Compute heat load on water supply",
-        "description": "On-site compute raises cooling water demand in an arid region.",
+        "title": title,
+        "description": description,
     })
     assert r.status_code == 201
     body = r.json()
@@ -261,7 +270,7 @@ def test_submit_and_list_tension(client):
     r2 = client.get("/instances/kimberim/tensions")
     assert r2.status_code == 200
     titles = [t["title"] for t in r2.json()["tensions"]]
-    assert "Compute heat load on water supply" in titles
+    assert title in titles
 
     # Detail endpoint returns it with the right fields.
     r3 = client.get(f"/instances/kimberim/tensions/{tension_id}")
@@ -293,9 +302,13 @@ def test_get_tension_unknown_returns_404(client):
 
 @pytest.mark.skipif(not _HAS_DB, reason="needs DATABASE_URL")
 def test_list_tensions_filtered_by_status(client):
-    """The status query param filters the backlog."""
+    """The status query param filters the backlog.
+
+    H10: per-run suffix on the title (a fixed title would be parked as a
+    near-duplicate of the previous run's row on the shared dev DB)."""
+    suffix = uuid4().hex[:8]
     created = client.post("/instances/kimberim/tensions", json={
-        "title": "open one", "description": "d",
+        "title": f"open one {suffix}", "description": f"d {suffix}",
     })
     assert created.status_code == 201
     created_id = created.json()["tension_id"]

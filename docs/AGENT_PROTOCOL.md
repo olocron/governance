@@ -245,6 +245,23 @@ attributed to the instance founder.
 **403** if your agent lacks the `submit` permission.
 **404** if `raised_by` is not registered on this instance.
 
+**Parking (backlog-flooding defense):** your submission is screened against
+your own tensions. A near-identical re-file of something you already have in
+the backlog is parked as a duplicate, and if you already hold more than 5
+open/triaged tensions, further submissions are parked over-cap. A parked
+tension is still 201 — fully recorded (the ledger event carries the park
+reason), still readable, and still deliberable by explicit `tension_id` — but
+it never enters the scheduler's queue:
+
+```json
+{"tension_id": "uuid-string", "status": "parked", "priority": 50,
+ "parked": true, "park_reason": "duplicate", "duplicate_of": "uuid-string"}
+```
+
+`park_reason` is `"duplicate"` (with `duplicate_of`) or `"open-cap"`. Raise
+distinct tensions rather than re-sends; a near-duplicate still lands in the
+public record, it just won't be scheduled.
+
 #### `GET /instances/{instance_id}/tensions?status=open`
 
 List the backlog. Optional `status` filter: `open|triaged|scheduled|in-deliberation|decided|parked`.

@@ -407,33 +407,48 @@ def raise_tension(
     title: str,
     description: str,
     priority: int = 50,
+    status: str = "open",
+    park_reason: str | None = None,
+    duplicate_of: UUID | None = None,
 ) -> TensionRow:
-    """Create a new tension in the backlog (status='open').
+    """Create a new tension in the backlog (status='open' by default).
 
     Also appends a `tension-raised` ledger event — activating the event_type
     that has been in the enum since S0 but never emitted. The caller commits.
+
+    H10 backlog-flooding defense: intake screening (olon.intake) may pass
+    status='parked' with a park_reason ('duplicate' + duplicate_of, or
+    'open-cap'). A parked tension is fully recorded (ledger event carries the
+    park reason — the public record stays complete) but never served by
+    next_tension; it can still be deliberated by explicit tension_id.
     """
     row = TensionRow(
         instance_id=instance_id,
         raised_by=raised_by_agent_id,
         title=title,
         description=description,
-        status="open",
+        status=status,
         priority=priority,
     )
     session.add(row)
     session.flush()
+    payload = {
+        "tension_id": str(row.id),
+        "title": title,
+        "description": description,
+        "raised_by": str(raised_by_agent_id),
+        "priority": priority,
+    }
+    if park_reason:
+        payload["parked"] = True
+        payload["park_reason"] = park_reason
+        if duplicate_of:
+            payload["duplicate_of"] = str(duplicate_of)
     append_ledger_event(
         session,
         instance_id=instance_id,
         event_type="tension-raised",
-        payload={
-            "tension_id": str(row.id),
-            "title": title,
-            "description": description,
-            "raised_by": str(raised_by_agent_id),
-            "priority": priority,
-        },
+        payload=payload,
     )
     return row
 

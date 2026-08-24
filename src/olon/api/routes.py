@@ -32,6 +32,7 @@ from olon.config import (
     load_runtime_config,
     resolve_cell,
 )
+from olon.intake import screen_intake
 from olon.schema import Permission
 from olon.store import (
     agent_permissions,
@@ -393,6 +394,13 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
     get the participant default {submit, deliberate, vote} → pass.
     S9: the check uses EFFECTIVE permissions — un-attested agents keep
     {submit} (open participation), everything else requires attestation.
+
+    H10 backlog-flooding defense: the submission is screened
+    (olon.intake.screen_intake) against the SUBMITTER'S own tensions — a
+    near-identical re-file is parked as a duplicate, and a non-founder
+    submitter over the open-tension cap has the excess parked. Parked ≠
+    rejected: the tension is recorded (201) with its park reason in the
+    public ledger; it just never enters the next_tension queue.
     """
     rt = load_runtime_config()
     eng = make_engine(rt.database_url)
@@ -414,9 +422,23 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
         else:
             founder = _ensure_founder_agent(s, instance_id)
             raised_by = founder.agent_id
+        # H10: screen against this submitter's own tensions (same-submitter
+        # dedup + per-submitter cap). Founder rows are cap-exempt.
+        submitter = get_agent(s, agent_id=raised_by)
+        is_founder = submitter is not None and submitter.role == "founder"
+        own = [
+            t for t in list_backlog(s, instance_id=instance_id)
+            if t.raised_by == raised_by
+        ]
+        decision = screen_intake(
+            own, title=body.title, description=body.description,
+            is_founder=is_founder,
+        )
         row = raise_tension(
             s, instance_id=instance_id, raised_by_agent_id=raised_by,
             title=body.title, description=body.description, priority=body.priority,
+            status="parked" if decision.parked else "open",
+            park_reason=decision.reason, duplicate_of=decision.duplicate_of,
         )
         s.commit()
         # S8 prompt-injection flag: tension text flows into Architect/Triage
@@ -425,7 +447,11 @@ async def submit_tension(instance_id: str, body: TensionSubmission) -> JSONRespo
         text_flag = scan_injection(f"{body.title}\n{body.description}")
         return JSONResponse(
             {"tension_id": str(row.id), "status": row.status, "priority": row.priority,
-             **({"injection_suspected": text_flag} if text_flag else {})},
+             **({"injection_suspected": text_flag} if text_flag else {}),
+             # H10: parked submissions say so (and why) — visible, reversible.
+             **({"parked": True, "park_reason": decision.reason,
+                 "duplicate_of": str(decision.duplicate_of)}
+                if decision.parked else {})},
             status_code=201,
         )
 
