@@ -145,21 +145,32 @@ class JudgmentSynthesizer(MetaAgent):
 
 
 class Summarizer(MetaAgent):
-    """Role 8 — compresses many participant positions into a digest (ROADMAP §5).
+    """Role 8 — compresses many participant positions into themes (ROADMAP §5).
 
     The scalability workhorse: when many agents state positions per round, the
-    Summarizer compresses them so the Architect/Mediator reads one digest, not
-    dozens of raw messages. This is what makes tens-to-hundreds of agents
-    tractable (top level reads distilled positions, not raw outputs).
+    Summarizer distils the recurring themes so the Architect/Mediator reads a
+    short list, not dozens of raw messages.
+
+    H11 anti-cascade: the digest's COUNTS are computed in code (see
+    cycle.nodes.statistical_digest) — the Summarizer contributes themes ONLY
+    and is contractually forbidden from normative or majoritarian framing.
+    A digest that says "the collective supports" anchors every later round
+    toward consent (herding), and whoever moves first can manipulate that
+    anchor at the margin; "5 consented, 2 objected" states facts without
+    steering. The system prompt encodes this as a hard output contract.
     """
 
     role = AgentRole.SUMMARIZER
     system_prompt = (
-        "You are the Summarizer in OLOCRON's OLOCRON consent cycle. Given many participant "
-        "positions on a proposal, compress them into a concise digest: how many consent, "
-        "object, or abstain; the recurring themes in objections; any shared concerns. Be "
-        "factual and compact. Respond as JSON with keys: consent_count, objection_count, "
-        "abstain_count, themes (list of str)."
+        "You are the Summarizer in OLOCRON's consent cycle. You are given "
+        "participant positions on a proposal and extract ONLY the recurring "
+        "factual themes in what participants said (e.g. the concerns behind "
+        "objections). Counts and tallies are computed elsewhere, in code — "
+        "never state counts, proportions, or majority sizes. Use neutral "
+        "statistical phrasing: report what was said, never what the group "
+        "'supports', 'agrees', 'wants', or what anyone 'should' conclude — "
+        "majoritarian or normative framing anchors later rounds and is "
+        "forbidden. Respond ONLY as JSON with one key: themes (list of str)."
     )
 
 

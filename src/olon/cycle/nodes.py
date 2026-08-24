@@ -56,6 +56,38 @@ def _emit(run: CycleRun, event_type: str, payload: dict) -> None:
             log.warning("ledger sink failed (non-fatal): %s", e)
 
 
+def statistical_digest(positions: list[dict]) -> dict:
+    """H11 anti-cascade: the round digest's COUNTS are computed here, in code,
+    from enum-validated positions — never authored or phrased by an LLM.
+
+    The digest feeds later rounds (H8 wired it into the Mediator's prompt), so
+    its framing is an anchor: a first-round Sybil consent must not be able to
+    turn into "the collective supports…" prose that herds every later round.
+    Counts-as-facts ("3 consented, 2 objected") inform; normative summaries
+    steer. The `framing` field states this contract where the digest is
+    consumed.
+    """
+    counts = {"consent": 0, "objection": 0, "abstain": 0}
+    weighted = {"consent": 0.0, "objection": 0.0, "abstain": 0.0}
+    for p in positions:
+        pos = p.get("position")
+        if pos in counts:
+            counts[pos] += 1
+            weighted[pos] += float(p.get("weight", 1.0))
+    return {
+        "consent_count": counts["consent"],
+        "objection_count": counts["objection"],
+        "abstain_count": counts["abstain"],
+        "weighted_consent": round(weighted["consent"], 4),
+        "weighted_objection": round(weighted["objection"], 4),
+        "weighted_abstain": round(weighted["abstain"], 4),
+        "framing": (
+            "statistical summary of stated positions — counts are observed "
+            "facts, not an endorsement or a normative signal"
+        ),
+    }
+
+
 def _architect_ref(run: CycleRun) -> AgentRef:
     """The AgentRef to attribute proposals to (the architect's ref)."""
     a = run.proposal_architect
@@ -118,9 +150,10 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
     objection becomes a structured Objection (causes-harm / not-safe-to-try /
     regresses-role). The DA is always consulted (ADR: mandatory red-team).
 
-    If a Summarizer is wired AND >2 agents responded, it compresses the round's
-    positions into a digest (the scalability workhorse). When participant_agents
-    is empty → S2 back-compat (DA only).
+    If >2 agents responded, a statistical digest of the round is computed IN
+    CODE (H11: counts from enum-validated positions — the scalability
+    workhorse without the herding surface); a wired Summarizer adds themes
+    only. When participant_agents is empty → S2 back-compat (DA only).
     """
     da = run.devils_advocate
     if da is None:
@@ -136,6 +169,14 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
     # S8: the proposal embeds public tension text (and prior amendment text
     # from other agents) — sandbox it so no agent's evaluation prompt can be
     # steered by injected content inside the proposal.
+    #
+    # H11 BLIND-ROUND INVARIANT: this prompt deliberately contains the proposal
+    # ONLY — no other agent's position, no digest, no counts. Agents state
+    # positions blind to their peers (the concurrent fan-out below enforces
+    # this in time as well), which is the anti-herding defense: whoever moves
+    # first cannot anchor the round. Do not add peer positions or digests to
+    # this prompt; the digest is consumed downstream (integrate), where it is
+    # phrased as a statistical summary.
     position_prompt = (
         "State your position on this proposal. Respond as JSON: "
         '{"position": "consent" | "objection" | "abstain"}. If you object, ALSO '
@@ -239,15 +280,33 @@ def object_round(state: CycleState, run: CycleRun) -> CycleState:
                               "weight": ref.weight, "position": "abstain"}
                 _apply(result)
 
-    # S3: optionally compress when there are many positions.
+    # H11 anti-cascade: the digest is a STATISTICAL SUMMARY whose counts are
+    # computed in code (statistical_digest) — never phrased by an LLM. With >2
+    # positions the digest now exists even without a Summarizer (counts
+    # only); a wired Summarizer contributes themes ONLY, and its prose never
+    # becomes the digest itself. A first-round Sybil consent can therefore
+    # produce at most "5 consented, 2 objected" — facts later rounds can weigh
+    # — never "the collective supports", which herds.
     digest: dict | None = None
     summarizer = getattr(run, "summarizer", None)
-    if summarizer is not None and len(positions) > 2:
-        digest_text = summarizer.respond(
-            f"Compress these positions into a digest. Positions: {json.dumps(positions)}",
-            max_tokens=300, temperature=0.2,
-        )
-        digest = _extract_json(digest_text)
+    if len(positions) > 2:
+        digest = statistical_digest(positions)
+        if summarizer is not None:
+            themes_text = summarizer.respond(
+                "Extract the recurring factual themes in these participant "
+                "positions. Positions: " + json.dumps(positions),
+                max_tokens=300, temperature=0.2,
+            )
+            themes_payload = _extract_json(themes_text)
+            if isinstance(themes_payload, dict):
+                raw_themes = themes_payload.get("themes")
+                if isinstance(raw_themes, list):
+                    # The themes are agent-generated free text re-fed into the
+                    # Mediator's prompt — clean + truncate each (S8 loop-side
+                    # backstop), and cap the count.
+                    digest["themes"] = [
+                        clean(str(t))[:MAX_REASON_LEN] for t in raw_themes[:10]
+                    ]
         if digest:
             _emit(run, "digest", digest)
 
@@ -306,15 +365,21 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
             "Objections:\n"
             + sandbox("objections", json.dumps(objections), max_len=8000)
         )
-        # H8: wire the round's Summarizer digest into the Mediator's context.
+        # H8: wire the round's digest into the Mediator's context.
         # The digest was computed in object_round but never surfaced to the
         # amender — so the Mediator amended blind to the round's consensus shape
         # and stated concerns. Now it sees them, so it can resolve objections in
         # light of what the whole circle actually said.
+        # H11: phrased as a STATISTICAL SUMMARY (counts-as-facts, computed in
+        # code) — never a normative signal. The Mediator must resolve
+        # objections on their merits; "most participants consented" is context,
+        # not a steer, and majority size is not the correct answer.
         digest = state.get("digest")
         if digest:
-            prompt += ("\nRound digest (Summarizer compression of all positions, "
-                       "UNTRUSTED):\n"
+            prompt += ("\nRound digest (STATISTICAL SUMMARY of the round's "
+                       "stated positions — counts are observed facts, not an "
+                       "endorsement or normative signal; majority size is not "
+                       "the correct answer), UNTRUSTED:\n"
                        + sandbox("round digest", json.dumps(digest), max_len=2000))
         if core_disagreement:
             prompt += (
@@ -607,5 +672,6 @@ __all__ = [
     "route_after_integrating",
     "route_after_objecting",
     "route_after_veto",
+    "statistical_digest",
     "veto_window",
 ]

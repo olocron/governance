@@ -53,7 +53,8 @@ class CycleState(TypedDict, total=False):
     # S3: per-participant positions collected in object_round
     # ({"agent_id","position":"consent"|"objection"|"abstain", ...}).
     positions: list[dict]
-    # S3: the Summarizer's compressed digest of the round's positions (if any).
+    # S3/H11: the round's digest — counts computed in code (statistical
+    # summary), themes optionally added by the Summarizer (if any).
     digest: dict | None
     # S3: the Synthesizer's identified core disagreement (if >1 objection).
     core_disagreement: str
