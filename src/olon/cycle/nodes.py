@@ -346,12 +346,21 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
                 "Identify the single core disagreement underlying these objections. "
                 + "Objections:\n"
                 + sandbox("objections", json.dumps(objections), max_len=8000),
-                max_tokens=300, temperature=0.2,
+                # Output headroom: shared_by echoes objection text, so the
+                # response scales with objection count — at 300 tokens a
+                # 5-objection round truncated mid-JSON and silently skipped
+                # synthesis entirely (observed live 2026-08-24).
+                max_tokens=800, temperature=0.2,
             )
             syn_payload = _extract_json(syn_text)
             core_disagreement = syn_payload.get("core_disagreement", "") if syn_payload else ""
             if core_disagreement:
                 _emit(run, "core-disagreement", {"core_disagreement": core_disagreement})
+            else:
+                log.warning(
+                    "Judgment Synthesizer response unparseable/empty — skipping "
+                    "core-disagreement (raw tail: %r)", syn_text[-120:]
+                )
 
         # S8: objections carry agent-generated free text (objection reasons)
         # and the proposal carries tension-derived text — sandbox both so the
@@ -387,7 +396,11 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
                 "UNTRUSTED):\n"
                 + sandbox("core disagreement", core_disagreement, max_len=1000)
             )
-        text = amender.respond(prompt, max_tokens=600, temperature=0.4)
+        # Output headroom (same class as the Synthesizer fix above): the
+        # amended proposal JSON scales with how much the objections demand;
+        # a truncated response silently skips the amendment, and the re-test
+        # then replays a cached identical round into escalation.
+        text = amender.respond(prompt, max_tokens=1000, temperature=0.4)
         payload = _extract_json(text)
         if payload:
             merged = {**proposal_payload, **payload}
@@ -404,6 +417,11 @@ def integrate(state: CycleState, run: CycleRun) -> CycleState:
                 "integration_rounds": rounds,
                 "core_disagreement": core_disagreement,
             }
+        log.warning(
+            "amender (%s) response unparseable/empty — no amendment this "
+            "round; re-test will replay (raw tail: %r)",
+            type(amender).__name__, text[-120:],
+        )
     return {"integration_rounds": rounds}
 
 
