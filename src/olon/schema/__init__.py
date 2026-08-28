@@ -42,6 +42,7 @@ class AgentRole(StrEnum):
     JUDGMENT_SYNTHESIZER = "judgment-synthesizer"
     SUMMARIZER = "summarizer"
     TRIAGE_GUARDIAN = "triage-guardian"
+    CHIEF_GOVERNANCE_AGENT = "chief-governance-agent"
     ETHICS_SAFETY_GUARDIAN = "ethics-safety-guardian"
     PROJECT_MANAGER = "project-manager"
     REPUTATION_STEWARD = "reputation-steward"
@@ -269,6 +270,10 @@ class LedgerEvent(BaseModel):
         "epoch-opened",
         "epoch-closed",
         "epoch-skipped",
+        # G1: governance operations (CGA attestation record + daily digest).
+        "agent-attested",
+        "agent-attestation-revoked",
+        "governance-digest",
     ]
     # The structured payload (one of the cycle models above), JSON-encoded.
     payload: dict

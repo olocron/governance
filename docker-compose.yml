@@ -44,6 +44,9 @@ services:
       HARNESS_COST_CAP_USD: ${HARNESS_COST_CAP_USD:-5.0}
       # S9: founder bearer token for the attest endpoint (empty = disabled).
       HARNESS_FOUNDER_TOKEN: ${HARNESS_FOUNDER_TOKEN:-}
+      # G1: Chief Governance Agent token — bounded delegated attestation
+      # + digest builds (empty = CGA auth disabled).
+      HARNESS_CGA_TOKEN: ${HARNESS_CGA_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

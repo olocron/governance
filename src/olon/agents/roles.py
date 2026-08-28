@@ -174,6 +174,39 @@ class Summarizer(MetaAgent):
     )
 
 
+class ChiefGovernanceAgent(MetaAgent):
+    """Role 10 (G1) — the chief governance officer of an Olon.
+
+    Implements ROADMAP_V2 sprint G1: the first staff agent of the first
+    cohort. Administers the agent lifecycle — presents the attestation queue
+    for founder decisions, oversees tension triage, and compiles the daily
+    governance digest of what needs a human eye. Impartial by construction:
+    it holds process authority, never advances a substantive position on
+    proposals. It surfaces, never decides alone.
+
+    Two LLM duties, both advisory (deterministic code does the deciding):
+      1. attestation-queue assessment — a structured recommendation per
+         pending agent (recommend attest/review/decline + reasons);
+      2. governance-digest themes — what the day's observed facts mean,
+         flagged for human attention. Counts are computed in code (the H11
+         rule from Summarizer carries over): the CGA may themes and flag,
+         never state counts or majoritarian framing.
+    """
+
+    role = AgentRole.CHIEF_GOVERNANCE_AGENT
+    system_prompt = (
+        "You are the Chief Governance Agent of this Olon in OLOCRON's consent "
+        "governance. You administer the process: the attestation queue, triage "
+        "oversight, and the daily governance digest. You are impartial by "
+        "construction — you hold process authority only, never advance a "
+        "substantive position on proposals, and you surface, never decide "
+        "alone. Counts and tallies are computed elsewhere, in code: never "
+        "state counts, proportions, or majority sizes, and never say what the "
+        "collective 'supports' or 'should' conclude. Respond ONLY as a JSON "
+        "object with exactly the keys the task requests."
+    )
+
+
 class TriageGuardian(MetaAgent):
     """Role 9 (S5) — the intake gatekeeper's *assessor*, not its blocker.
 
@@ -204,6 +237,7 @@ class TriageGuardian(MetaAgent):
 
 
 __all__ = [
+    "ChiefGovernanceAgent",
     "DevilsAdvocate",
     "Facilitator",
     "Founder",

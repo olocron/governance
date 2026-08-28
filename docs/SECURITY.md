@@ -7,7 +7,7 @@
 >
 > **Scope:** the engage API (`api.kimberim.com`) — FastAPI app, consent-cycle
 > engine, LLM gateway, federation adapter layer, and the production VPS stack.
-> **Last updated:** 2026-08-24 (H10–H12 wave).
+> **Last updated:** 2026-08-28 (G1 governance surface).
 
 ---
 
@@ -39,6 +39,8 @@ those four.
 | 7 | **Secrets into prompts (federation = exfil)** | invariant | ✅ H12 (this doc §7) | `security.py`, gateway, endpoint adapter |
 | 8 | Rubber-stamping & collusion | ongoing | 🟡 defended-in-depth; S10/S11 close it (§8) | mandatory DA, loop caps, §9 dossiers |
 | 9 | Per-agent authn (agent_id is spoofable) | medium | ⏳ roadmap (protocol v2) | accepted risk, §9 below |
+| 10 | **Delegated-attestation token abuse (CGA)** | medium | ✅ G1 (§7a) | `api/governance.py`, attest route bounds |
+| 11 | **Ungated triage endpoint (LLM burn + record writes)** | medium | ✅ G1 (§7a) | `routes._gate_triage` (doc'd S5 gate, now enforced) |
 
 ---
 
@@ -221,6 +223,57 @@ transports — no network, no LLM).
 
 ---
 
+## 7a. G1 — The governance surface (Chief Governance Agent, 2026-08-28)
+
+**New auth surface.** A second bearer token, `HARNESS_CGA_TOKEN`
+(`api/governance.py:cga_authorized`), distinct from the founder token.
+It grants exactly two powers and nothing else:
+
+1. **Bounded delegated attestation** — the CGA token may call
+   `POST …/agents/{id}/attest` with `{"attested": true}` **only** within
+   the instance-configured bounds (`governance.attestation_delegation` in
+   `instance.yaml`): delegation enabled, stakeholder type in
+   `allowed_stakeholder_types` (KIMBERIM excludes `founder` and
+   `traditional-owners` — first-class cells are founder-only), and a
+   rolling-24h cap counted **from the ledger** (`agent-attested` events
+   with `actor: cga`). Violations return structured 403s with
+   `escalate_to: founder`. **Revocation is not delegable at all.**
+2. **Digest builds / queue assessments** — `POST …/governance/digest` and
+   `?assess=true` (both spend LLM budget). Facts-only reads stay public.
+
+**Attestation is now an attributed, public act.** Every state change
+writes an `agent-attested` / `agent-attestation-revoked` ledger event
+carrying the actor (`founder` | `cga`) — the cap and the digest count
+from the ledger, not a mutable counter. No-op re-attestations record
+nothing.
+
+**Triage gate enforced (documented since S5, now real).**
+`POST …/tensions/{id}/triage` requires `?triggered_by=` an attested agent
+holding the `triage` permission; LLM failure degrades to a retryable 503
+instead of a 500. Fixed alongside: the endpoint previously wrote the
+ephemeral Guardian MetaAgent's UUID into `tension.triaged_by`
+(FK → `agent_registry`) — a latent FK violation on every real call;
+it now records the accountable caller, with the Guardian noted as
+`assessed_by` inside the assessment.
+
+**Digest is counts-from-code (H11 carries over).** `build_governance_digest`
+computes every count in SQL/Python; the CGA LLM call contributes themes +
+flags only, with the same never-state-counts contract. Malformed/rogue
+output is normalized to string lists; facts are unreachable from LLM
+output. Untrusted tension titles are `sandbox()`-fenced into the prompt;
+LLM failure degrades to a recorded facts-only digest (`cga: unavailable`).
+
+**Tests:** `tests/test_governance_unit.py` (21 tests: bounds, cap, ledger
+events, queue degradation, digest counts-vs-themes tripwire, triage gate,
+scheduler due-logic — all stubbed, no live LLM).
+
+**Not covered (deliberate):** auto-attest mode exists in config but ships
+**off** (recommend-only; flipping it is a governed act, G3). The CGA token
+is a shared static secret like the founder token — same handling rules
+(server-side `.env` only, must differ from the founder token).
+
+---
+
 ## 8. Rubber-stamping & collusion (ongoing — addressed by roadmap)
 
 **In place today** (defense-in-depth, not a solution):
@@ -286,3 +339,4 @@ signal.
 | 2026-08-24 | H10 | intake screening: same-submitter dedup parks + per-submitter open cap |
 | 2026-08-24 | H11 | statistical digest in code, blind round-1, themes-only Summarizer |
 | 2026-08-24 | H12 | prompt-data invariant written down + redaction tripwires at 3 choke points |
+| 2026-08-28 | G1 | CGA governance surface: bounded delegated attestation, attributed ledger events, triage gate enforced, counts-from-code digest |

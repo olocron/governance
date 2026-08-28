@@ -142,8 +142,8 @@ class TensionRow(SQLModel, table=True):
     title: str
     description: str
     created_at: datetime = Field(default_factory=_now)
-    # S5 backlog columns.
-    status: str = Field(default="open", index=True)  # open|triaged|scheduled|in-deliberation|decided|parked
+    # S5 backlog columns. status: open|triaged|scheduled|in-deliberation|decided|parked
+    status: str = Field(default="open", index=True)
     priority: int = Field(default=50, index=True)  # lower = higher priority (1..100)
     triage: str | None = None  # JSON: {on_domain, materiality, duplicate_of, notes}
     triaged_by: UUID | None = Field(default=None, foreign_key="agent_registry.agent_id")
@@ -266,6 +266,30 @@ def append_ledger_event(
     return row
 
 
+def list_ledger_events(
+    session: SMSession,
+    *,
+    instance_id: str,
+    event_type: str | None = None,
+    since: datetime | None = None,
+    limit: int = 100,
+) -> list[LedgerEventRow]:
+    """Query the ledger (G1): newest-first filtered read.
+
+    The ledger is write-once via append_ledger_event; this is the read side
+    the governance surface needs — the CGA's 24h attestation cap and the
+    daily digest both count events from here. Payloads stay JSON text (the
+    caller decodes what it needs).
+    """
+    stmt = select(LedgerEventRow).where(LedgerEventRow.instance_id == instance_id)
+    if event_type is not None:
+        stmt = stmt.where(LedgerEventRow.event_type == event_type)
+    if since is not None:
+        stmt = stmt.where(LedgerEventRow.created_at >= since)
+    stmt = stmt.order_by(LedgerEventRow.created_at.desc(), LedgerEventRow.sequence.desc())
+    return list(session.exec(stmt.limit(limit)).all())
+
+
 # ── Agent registration helpers (S4) ───────────────────────────────────────────
 
 
@@ -355,14 +379,39 @@ def get_agent(session: SMSession, *, agent_id: UUID) -> AgentRegistryRow | None:
 
 
 def attest_agent(
-    session: SMSession, *, agent_id: UUID, attested: bool
+    session: SMSession,
+    *,
+    agent_id: UUID,
+    attested: bool,
+    attested_by: str = "founder",
 ) -> AgentRegistryRow | None:
-    """Set an agent's attestation flag (founder action, S9). None if absent."""
+    """Set an agent's attestation flag (S9) and record it to the ledger (G1).
+
+    Attestation is a public, revocable act — G1 makes that literal: every
+    grant/revoke appends an `agent-attested`/`agent-attestation-revoked`
+    ledger event carrying the ACTOR ("founder" or "cga") so the digest and
+    the CGA's daily cap can be computed from the ledger alone. None if the
+    agent is absent (no event, no mutation); a no-op re-attestation of the
+    current state records no event (the ledger records acts, not echoes).
+    """
     row = session.get(AgentRegistryRow, agent_id)
     if row is None:
         return None
+    prior = bool(row.attested)
     row.attested = attested
     session.add(row)
+    if prior != bool(attested):
+        append_ledger_event(
+            session,
+            instance_id=row.instance_id,
+            event_type="agent-attested" if attested else "agent-attestation-revoked",
+            payload={
+                "agent_id": str(agent_id),
+                "display_name": row.display_name,
+                "actor": attested_by,
+                "prior": prior,
+            },
+        )
     session.flush()
     return row
 

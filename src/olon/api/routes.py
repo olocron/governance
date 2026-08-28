@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request
@@ -26,6 +27,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from olon.agents import TriageGuardian
 from olon.api.feed import CLOSE
+from olon.api.governance import (
+    cga_authorized,
+    delegation_bounds_error,
+    founder_authorized,
+)
 from olon.api.live import run_deliberation_live
 from olon.config import (
     load_instance_config,
@@ -34,13 +40,13 @@ from olon.config import (
 )
 from olon.intake import screen_intake
 from olon.schema import Permission
+from olon.security import sandbox, scan_injection
 from olon.store import (
     agent_permissions,
     attest_agent,
+    current_epoch,
     effective_permissions,
     effective_weight,
-    close_epoch,
-    current_epoch,
     get_agent,
     get_epoch,
     get_tension,
@@ -48,17 +54,16 @@ from olon.store import (
     list_backlog,
     list_epochs,
     make_engine,
-    next_tension,
     open_epoch,
     raise_tension,
     register_agent,
-    start_epoch,
     triage_tension,
 )
-from olon.security import sandbox, scan_injection
 from olon.utils import extract_json
 
 router = APIRouter()
+
+log = logging.getLogger(__name__)
 
 
 # ── Request/response models ──────────────────────────────────────────────────
@@ -248,14 +253,8 @@ class AttestRequest(BaseModel):
     attested: bool = True
 
 
-def _founder_authorized(request: Request) -> bool:
-    """True if the request carries the founder bearer token (HARNESS_FOUNDER_TOKEN)."""
-    rt = load_runtime_config()
-    if not rt.founder_token:
-        return False
-    auth = request.headers.get("authorization", "")
-    scheme, _, token = auth.partition(" ")
-    return scheme.lower() == "bearer" and token.strip() == rt.founder_token
+# founder_authorized / cga_authorized live in olon.api.governance (G1) —
+# shared by the attest route here and the governance endpoints there.
 
 
 @router.post("/instances/{instance_id}/agents/{agent_id}/attest")
@@ -263,35 +262,57 @@ async def attest(
     instance_id: str, agent_id: UUID, request: Request,
     body: AttestRequest | None = None,
 ) -> JSONResponse:
-    """Founder-only: attest (or revoke) an agent's full participation (S9).
+    """Attest (or revoke) an agent's full participation (S9; G1 delegation).
 
     Attestation unlocks the agent's claimed ABAC cell — its resolved
     permissions (vote/deliberate/triage/...) and its claimed weight
     (including first-class 2.0 types, which are otherwise capped at 1.0).
     Un-attested agents are submit-only by design (the Sybil defense).
 
-    Auth: Authorization: Bearer <HARNESS_FOUNDER_TOKEN>. The endpoint is
-    disabled (503) when no token is configured.
+    Auth (G1): the founder token carries full power, unchanged. The CGA
+    token (HARNESS_CGA_TOKEN) may GRANT attestation only, and only within
+    the instance's founder-set bounds (governance.attestation_delegation:
+    enabled, allowed stakeholder types, max per rolling 24h). Revocation
+    stays founder-only — a disciplinary act is not delegable in G1. Every
+    state change is recorded to the ledger with its actor.
     """
     rt = load_runtime_config()
-    if not rt.founder_token:
+    if not rt.founder_token and not rt.cga_token:
         return JSONResponse(
-            {"error": "attestation is disabled (no HARNESS_FOUNDER_TOKEN configured)"},
+            {"error": "attestation is disabled (no HARNESS_FOUNDER_TOKEN "
+                      "or HARNESS_CGA_TOKEN configured)"},
             status_code=503,
         )
-    if not _founder_authorized(request):
-        return JSONResponse({"error": "founder authorization required"}, status_code=403)
+    founder = founder_authorized(request)
+    cga = (not founder) and cga_authorized(request)
+    if not founder and not cga:
+        return JSONResponse({"error": "founder or CGA authorization required"},
+                            status_code=403)
 
     target = body.attested if body is not None else True
+    ic = load_instance_config(instance_id)
     eng = make_engine(rt.database_url)
     with SMSession(eng) as s:
-        row = attest_agent(s, agent_id=agent_id, attested=target)
+        row = get_agent(s, agent_id=agent_id)
         if row is None or row.instance_id != instance_id:
             return JSONResponse({"error": "agent not found"}, status_code=404)
+        actor = "cga" if cga else "founder"
+        if cga:
+            # Revocation is not delegable; grants are bounded.
+            if not target:
+                return JSONResponse(
+                    {"error": "revocation is founder-only", "escalate_to": "founder"},
+                    status_code=403,
+                )
+            bounds_error = delegation_bounds_error(s, ic, row, instance_id=instance_id)
+            if bounds_error is not None:
+                return bounds_error
+        row = attest_agent(s, agent_id=agent_id, attested=target, attested_by=actor)
         s.commit()
         return JSONResponse({
             "agent_id": str(agent_id),
             "attested": row.attested,
+            "attested_by": actor,
             "effective_permissions": sorted(effective_permissions(row)),
             "effective_weight": effective_weight(row),
         })
@@ -478,14 +499,50 @@ async def get_tension_detail(instance_id: str, tension_id: UUID) -> JSONResponse
         return JSONResponse(_tension_out(row))
 
 
+def _gate_triage(
+    s: SMSession, instance_id: str, triggered_by: UUID | None
+) -> JSONResponse | None:
+    """G1 triage oversight: running the Triage Guardian requires an attested
+    agent holding the `triage` permission — the gate AGENT_PROTOCOL §3.3 has
+    always claimed; G1 makes the code match the document. Returns the error
+    response to send, or None if authorized."""
+    if triggered_by is None:
+        return JSONResponse(
+            {"error": "triggered_by (an agent holding the triage permission) "
+                      "is required to run triage"},
+            status_code=403,
+        )
+    agent = get_agent(s, agent_id=triggered_by)
+    if agent is None or agent.instance_id != instance_id:
+        return JSONResponse({"error": "triggered_by agent not registered on this instance"},
+                            status_code=404)
+    if not agent.attested:
+        return JSONResponse(
+            {"error": "agent is not attested — submit-only until the founder attests it"},
+            status_code=403,
+        )
+    if "triage" not in effective_permissions(agent):
+        return JSONResponse({"error": "agent lacks the triage permission"},
+                            status_code=403)
+    return None
+
+
 @router.post("/instances/{instance_id}/tensions/{tension_id}/triage")
-async def triage(instance_id: str, tension_id: UUID) -> JSONResponse:
+async def triage(
+    instance_id: str, tension_id: UUID, triggered_by: UUID | None = None,
+) -> JSONResponse:
     """Run the Triage Guardian on a backlog tension and record its assessment.
 
     Feeds the Guardian: the tension itself, a compact digest of existing open/
     decided tensions (for dedup), and the instance taxonomy (for on-domain).
     The assessment is written via triage_tension (status → 'triaged', a
     tension-triaged ledger event is appended). Returns the assessment.
+
+    G1: requires ?triggered_by= of an attested agent holding the `triage`
+    permission (staff/founder) — the call spends LLM budget and writes to the
+    record. An LLM failure returns a structured 503 (assessment unavailable)
+    instead of an unhandled 500 — triage can be retried; the tension is
+    untouched either way.
 
     This is a SOFT gate: the assessment flags duplicates/off-domain/noise but
     never blocks a tension from the backlog — the founder can still deliberate
@@ -495,6 +552,9 @@ async def triage(instance_id: str, tension_id: UUID) -> JSONResponse:
     eng = make_engine(rt.database_url)
     ic = load_instance_config(instance_id)
     with SMSession(eng) as s:
+        gate = _gate_triage(s, instance_id, triggered_by)
+        if gate is not None:
+            return gate
         row = get_tension(s, tension_id=tension_id)
         if row is None or row.instance_id != instance_id:
             return JSONResponse({"error": "tension not found"}, status_code=404)
@@ -520,19 +580,34 @@ async def triage(instance_id: str, tension_id: UUID) -> JSONResponse:
         prompt = (
             "Assess this new tension for the backlog. Respond ONLY as JSON.\n"
             f"Tension title:\n{sandbox('tension title', row.title, max_len=300)}\n"
-            f"Tension description:\n{sandbox('tension description', row.description, max_len=5000)}\n"
+            "Tension description:\n"
+            f"{sandbox('tension description', row.description, max_len=5000)}\n"
             f"Existing tensions to check for duplicates: {json.dumps(dedup_context)}\n"
             f"Instance taxonomy (for on-domain check): {json.dumps(taxonomy)}\n"
             f"ABAC matrix (stakeholder authority, for materiality): {json.dumps(abac)}\n"
             "If this duplicates an existing tension, set duplicate_of to that "
             "tension's id (string). Otherwise null."
         )
-        text = guardian.respond(prompt, max_tokens=400, temperature=0.2)
+        try:
+            text = guardian.respond(prompt, max_tokens=400, temperature=0.2)
+        except Exception as e:  # noqa: BLE001 — degrade to a retryable 503
+            log.warning("triage agent call failed for %s: %s", tension_id, e)
+            return JSONResponse(
+                {"error": "triage assessment unavailable (agent call failed); "
+                          "the tension is untouched and triage can be retried"},
+                status_code=503,
+            )
         assessment = extract_json(text)
 
+        # triaged_by is the ACCOUNTABLE CALLER (the attested triage-permission
+        # holder from the G1 gate), not the ephemeral Guardian MetaAgent —
+        # tension.triaged_by carries a hard FK to agent_registry, and
+        # provenance should name who ran the assessment anyway. The Guardian
+        # remains the assessor of record inside the assessment itself.
+        assessment.setdefault("assessed_by", "triage-guardian")
         triaged = triage_tension(
             s, tension_id=tension_id,
-            triaged_by_agent_id=guardian.ref.agent_id,
+            triaged_by_agent_id=triggered_by,
             triage=assessment,
         )
         s.commit()

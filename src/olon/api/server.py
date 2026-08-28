@@ -23,8 +23,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from olon.api.feed import FeedBroker
+from olon.api.governance import router as governance_router
 from olon.api.routes import router
-from olon.api.scheduler import epoch_scheduler
+from olon.api.scheduler import digest_scheduler, epoch_scheduler
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 # The repo-level docs/ directory (AGENT_PROTOCOL.md, PARTICIPIPANT_HANDBOOK.md,
@@ -60,17 +61,36 @@ def _any_scheduled_instance() -> bool:
     return False
 
 
+def _any_digest_instance() -> bool:
+    """True if any instance config opts into scheduled governance digests
+    (G1: governance.digest_interval_h > 0)."""
+    from olon.config import INSTANCES_DIR, load_instance_config
+    if not INSTANCES_DIR.exists():
+        return False
+    for path in INSTANCES_DIR.glob("*/instance.yaml"):
+        try:
+            ic = load_instance_config(path.parent.name)
+        except Exception:  # noqa: BLE001
+            continue
+        if ic.governance.digest_interval_h > 0:
+            return True
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the epoch scheduler on startup (if any instance is non-manual),
-    cancel it on shutdown."""
-    task = None
+    """Start the epoch scheduler (if any instance is non-manual) and the
+    digest scheduler (if any instance opts into scheduled digests), cancel
+    both on shutdown."""
+    tasks: list[asyncio.Task] = []
     if _any_scheduled_instance():
-        task = asyncio.create_task(epoch_scheduler(app))
+        tasks.append(asyncio.create_task(epoch_scheduler(app)))
+    if _any_digest_instance():
+        tasks.append(asyncio.create_task(digest_scheduler(app)))
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
             try:
                 await task
@@ -101,6 +121,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(governance_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

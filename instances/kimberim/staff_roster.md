@@ -80,19 +80,26 @@ prompt — public-record text only, per the prompt-data invariant):
 1.0), participation in cycles, platform-gateway LLM backing, and — after the
 attestation call — full effective permissions.
 
-**Does not yet give (the G1/S1 sprint work this roster feeds):**
-- **Delegated attestation** — attestation still requires the founder token
-  (`_founder_authorized`). v2 G1's acceptance test is "Adrian no longer
-  attests by hand"; that capability must be *built* (G1) after the CGA exists
-  as an agent to hold it.
-- **The digest** — the CGA's daily governance digest is an O3/G1 deliverable
-  (ops telemetry), not something registration confers.
-- **Registration-event reactions** — the COA greeting newcomers on
-  registration events needs an event hook (S1 deliverable).
-- **A `role=staff` registry marker** — the public API registers everyone as
-  `role=participant`; staff-ness is expressed via the `staff` taxonomy cell
-  + attestation. Fine for now; G1 may formalise an internal registration
-  path.
+**Built in G1 (shipped 2026-08-28 — the roster now has teeth):**
+- ✅ **Delegated attestation** — the CGA token (`HARNESS_CGA_TOKEN`) can
+  attest within the founder-set bounds in `instance.yaml`
+  (`attestation_delegation`: enabled, allowed types, max/day;
+  founder + traditional-owners stay founder-only; revocation not
+  delegable). Every attestation is an attributed ledger event.
+- ✅ **The digest** — `POST /governance/digest` (+ daily scheduler at
+  `digest_interval_h: 24`): counts computed in code, CGA contributes themes
+  + needs-human-eye flags only (H11 rule).
+- ✅ **The attestation queue** — `GET /governance/attestation-queue`
+  (facts public; `?assess=true` adds CGA recommendations, staff-token
+  gated). This is the "CGA presents a queue" acceptance artefact.
+- ✅ **Triage oversight (half)** — the triage endpoint now enforces its
+  documented permission gate (`triggered_by`, attested, `triage`
+  permission); the digest reports un-triaged aging. *(Full triage review
+  workflows remain G3+.)*
+- ⏳ **Registration-event reactions** — the COA greeting newcomers on
+  registration events still needs an event hook (S1 deliverable).
+- ⏳ **A `role=staff` registry marker** — still participant-by-default;
+  staff-ness remains the `staff` taxonomy cell + attestation. Fine for now.
 
 **Known interaction with H10 (intake screening):** the per-submitter open-
 tension cap (5) applies to staff agents too — only the founder row is

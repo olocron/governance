@@ -2,6 +2,7 @@
 
 from olon.agents.base import MetaAgent, StubAgent
 from olon.agents.roles import (
+    ChiefGovernanceAgent,
     DevilsAdvocate,
     Facilitator,
     Founder,
@@ -15,6 +16,7 @@ from olon.agents.roles import (
 )
 
 __all__ = [
+    "ChiefGovernanceAgent",
     "DevilsAdvocate",
     "Facilitator",
     "Founder",

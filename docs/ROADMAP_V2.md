@@ -147,3 +147,17 @@ verify live → ledger/doc record. No exceptions.
   backups = manual `pg_dump` (O4 formalizes).
 
 *v2 adopted 2026-08-24. First sprint: **G1 — Chief Governance Agent.***
+
+---
+
+## 7. Sprint record — G1 (shipped 2026-08-28)
+
+| Field | Record |
+|---|---|
+| **Trigger** | ROADMAP v2 adoption (2026-08-24): the first cohort table names the CGA as the first staff agent; the staff roster draft (§1.1) awaited its capabilities. |
+| **Scope** | Full G1: CGA as a first-class staff role; delegated attestation (CGA bearer token, founder-set bounds in `instance.yaml`, recommend-only — `auto_attest` ships OFF for G3); attestation queue (facts public, LLM assessment gated); daily governance digest (counts-from-code, ledger-recorded, 24h scheduler); triage oversight (documented permission gate enforced, retryable 503 degradation). |
+| **Also fixed** | Attestation history gap (grants/revokes now attributed ledger events); latent triage FK violation (ephemeral Guardian UUID written into `tension.triaged_by` — now the accountable caller); `list_ledger_events` read API added. |
+| **Tests** | 21 new (`tests/test_governance_unit.py`, stubbed LLM); full gate green (159 non-live + 44 DB-unit + 21 G1). |
+| **Measured outcome** | Acceptance met in code: the CGA presents a queue (`GET /governance/attestation-queue`), attests within bounds by token, and digests daily. "Adrian no longer attests by hand" completes with the roster registration + first real use (ops step). |
+| **Sequenced next** | O1 (doc root) → S1/S2 (COA + feedback) opens the first real-world loop, per §5. |
+| **Docs** | AGENT_PROTOCOL.md v1.1 (§5.5.1 governance surface); SECURITY.md §7a + change log; staff_roster.md §2 flipped. |

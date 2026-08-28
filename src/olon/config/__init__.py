@@ -50,6 +50,11 @@ class RuntimeConfig(BaseModel):
     # calls (POST /instances/{id}/agents/{id}/attest). Empty = the endpoint
     # is disabled. Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
     founder_token: str = Field(default="", alias="HARNESS_FOUNDER_TOKEN")
+    # G1 delegated attestation: bearer token for the Chief Governance Agent
+    # (CGA). Grants the attest endpoint within the instance-configured
+    # bounds (governance.attestation_delegation) — never the founder's full
+    # power. Empty = CGA-token auth is disabled. Generate the same way.
+    cga_token: str = Field(default="", alias="HARNESS_CGA_TOKEN")
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
@@ -166,6 +171,27 @@ def resolve_cell(
     return perms, weight
 
 
+class AttestationDelegationConfig(BaseModel):
+    """G1 — founder-set bounds within which the CGA may attest.
+
+    The CGA token holder can call the attest endpoint ONLY within these
+    bounds; anything outside them escalates to the founder (403 with a
+    structured reason, surfaced in the attestation queue). `auto_attest`
+    gates a future autonomous mode (G3) — recommend-only is the G1 default.
+    """
+
+    enabled: bool = False
+    # Max attestations the CGA may execute per rolling 24h window.
+    max_per_day: int = 10
+    # Stakeholder types the CGA may attest. Absent/empty = none (the founder
+    # cell is always excluded regardless of this list).
+    allowed_stakeholder_types: list[str] = Field(default_factory=list)
+    # Reserved for G3: CGA attests within bounds without a human in the loop.
+    auto_attest: bool = False
+
+    model_config = {"extra": "ignore"}
+
+
 class GovernanceConfig(BaseModel):
     """Tunable governance parameters for the consent cycle (ADR 0001).
 
@@ -186,6 +212,11 @@ class GovernanceConfig(BaseModel):
     # 'neither' = abstain contributes to neither consent nor objection weight
     # (ADR open question #2, resolved: abstain = not-an-objection).
     abstain_counts_as: Literal["neither", "consent"] = "neither"
+    # G1: bounds for CGA-delegated attestation (None/disabled = founder-only).
+    attestation_delegation: AttestationDelegationConfig | None = None
+    # G1: hours between scheduled governance digests. 0 = no scheduler
+    # (the endpoint can still be called on demand). 24 = daily.
+    digest_interval_h: float = 0.0
 
     model_config = {"extra": "ignore"}
 

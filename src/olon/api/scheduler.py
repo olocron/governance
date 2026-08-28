@@ -1,16 +1,19 @@
-"""The in-process epoch scheduler (S7).
+"""The in-process schedulers (S7 epochs; G1 governance digests).
 
-A background asyncio task that fires epochs on cadence for any instance whose
-CadenceConfig.preset is not 'manual'. Dev-grade: lives in the FastAPI process,
-dies on restart, single-process. Upgradable to an external worker later.
+Background asyncio tasks in the FastAPI process. Dev-grade: they live and die
+with the process, single-process. Upgradable to an external worker later.
 
-Each tick, per instance with non-manual cadence:
+epoch_scheduler — for any instance whose CadenceConfig.preset is not 'manual':
   - if an epoch is already running → skip (overlap guard)
   - else pop next_tension; if None → open+close a 'skipped' epoch
   - else open an epoch + fire run_deliberation_live (the worker closes it)
 
-All per-instance work is wrapped non-fatal: one instance failing never kills the
-scheduler loop. The scheduler holds the process-wide broker + a DB engine.
+digest_scheduler (G1) — for any instance with governance.digest_interval_h>0:
+  - build the governance digest when the last recorded one is older than the
+    interval (ledger-driven timing: restart-safe, no state to persist)
+
+All per-instance work is wrapped non-fatal: one instance failing never kills a
+scheduler loop. The schedulers hold the process-wide broker + a DB engine.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import asyncio
 import logging
 from uuid import uuid4
 
+from sqlalchemy import text
 from sqlmodel import Session as SMSession
 
 from olon.api.live import run_deliberation_live
@@ -126,4 +130,102 @@ def _fire_epoch(instance_id: str, broker, eng, config, loop) -> None:
     log.info("scheduler: fired epoch for %s (tension %s)", instance_id, trow.id)
 
 
-__all__ = ["epoch_scheduler"]
+# ── Governance digest scheduler (G1) ─────────────────────────────────────────
+
+
+def _digest_instances() -> list[tuple[str, float]]:
+    """Instances with scheduled governance digests, as
+    (instance_id, interval_hours). digest_interval_h <= 0 = off."""
+    out: list[tuple[str, float]] = []
+    if not INSTANCES_DIR.exists():
+        return out
+    for path in INSTANCES_DIR.glob("*/instance.yaml"):
+        instance_id = path.parent.name
+        try:
+            ic = load_instance_config(instance_id)
+        except Exception:  # noqa: BLE001 — a bad config must not kill the loop
+            continue
+        if ic.governance.digest_interval_h > 0:
+            out.append((instance_id, float(ic.governance.digest_interval_h)))
+    return out
+
+
+def _build_digest(instance_id: str, eng) -> bool:
+    """Build + persist one governance digest (synchronous DB/LLM work).
+    Returns True if a digest was recorded. The CGA's theme call degrades
+    gracefully inside build_governance_digest — a provider outage records the
+    facts without themes rather than skipping the day."""
+    from olon.api.governance import build_governance_digest
+
+    ic = load_instance_config(instance_id)
+    with SMSession(eng) as s:
+        digest = build_governance_digest(s, ic=ic)
+        s.commit()
+    log.info(
+        "digest scheduler: recorded governance digest for %s "
+        "(pending_attestations=%s decisions=%s)",
+        instance_id,
+        digest["facts"]["attestations"]["pending_count"],
+        digest["facts"]["cycles"]["decisions_recorded"],
+    )
+    return True
+
+
+def _digest_due(instance_id: str, eng, *, interval_h: float) -> bool:
+    """True when no digest exists yet, or the newest is older than the
+    interval. Timing comes from the ledger — restart-safe, no in-memory
+    bookkeeping to lose.
+
+    Age is computed in SQL (now() - created_at): row timestamps are stored
+    tz-naive in the session timezone, so Python-side UTC arithmetic would be
+    off by the server's UTC offset.
+    """
+    with SMSession(eng) as s:
+        got = s.execute(text(
+            "SELECT EXTRACT(EPOCH FROM (now() - created_at)) / 3600.0 AS age_h "
+            "FROM ledger_event "
+            "WHERE instance_id = :i AND event_type = 'governance-digest' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ), {"i": instance_id}).scalar()
+    if got is None:
+        return True
+    return float(got) >= interval_h
+
+
+async def digest_scheduler(app) -> None:  # noqa: ARG001 — app for symmetry
+    """The G1 digest loop. Started by create_app's lifespan when at least one
+    instance opts in (governance.digest_interval_h > 0). Runs until cancelled.
+
+    The blocking build runs in a worker thread so a slow LLM call can't stall
+    the event loop (same pattern the epoch scheduler's deliberations follow).
+    """
+    config = load_runtime_config()
+    eng = make_engine(config.database_url)
+    loop = asyncio.get_running_loop()
+    busy: set[str] = set()  # instances with a build in flight
+
+    log.info("digest scheduler started")
+    try:
+        while True:
+            for instance_id, interval_h in _digest_instances():
+                if instance_id in busy:
+                    continue
+                try:
+                    if not _digest_due(instance_id, eng, interval_h=interval_h):
+                        continue
+                    busy.add(instance_id)
+                    await loop.run_in_executor(None, _build_digest, instance_id, eng)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "digest tick failed for %s (non-fatal): %s", instance_id, e,
+                    )
+                finally:
+                    busy.discard(instance_id)
+            await asyncio.sleep(_SCAN_INTERVAL)
+    except asyncio.CancelledError:
+        log.info("digest scheduler cancelled (shutdown)")
+    finally:
+        eng.dispose()
+
+
+__all__ = ["digest_scheduler", "epoch_scheduler"]
