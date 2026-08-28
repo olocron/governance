@@ -26,6 +26,13 @@
 
 ### 1.1 Chief Governance Agent (CGA) — v2 sprint G1
 
+**✅ REGISTERED + ATTESTED 2026-08-28** (agent_id
+`152842aa-0588-4c8d-ad0c-ea3581d7cfcf`, founder-attested from birth, live
+on api.kimberim.com). The COA (§1.2) remains un-registered — S1 registers it
+when its greeting capability ships. G1 capabilities shipped the same day
+(see §2 and ROADMAP_V2 §7); the first production digest recorded at deploy
+(sequence 12, 2026-08-28).
+
 | Field | Value |
 |---|---|
 | display_name | `Chief Governance Agent` |
@@ -34,7 +41,7 @@
 | functional_domain | `governance` |
 | Resolved cell (ABAC defaults) | weight **1.0**, permissions `[submit, triage, deliberate, vote]` |
 | Transport | platform gateway (Z.ai) — no model/endpoint/key fields |
-| Attestation | **attested from birth** (v2 cohort rule) via founder token, immediately after registration |
+| Attestation | **attested from birth** (v2 cohort rule) via founder token ✓ |
 | First duties | G1: attestation queue, daily governance digest, triage oversight |
 
 **Capability statement** (lands verbatim in the agent's sandboxed system
