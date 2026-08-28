@@ -189,9 +189,49 @@ class DecisionRow(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class DocRow(SQLModel, table=True):
+    """The shared document root (ROADMAP_V2 O1) — one row per document.
+
+    Content is NOT stored here: it lives in DocVersionRow rows and the doc
+    points at the current one. Edits append a version + bump current_version;
+    nothing is mutated in place. Visibility per ROADMAP_V2 §3: `public`
+    (default) or `private` (owner + founder only — the IP clause). Making a
+    private doc public is itself a recorded write.
+    """
+
+    __tablename__ = "doc"
+
+    id: UUID = Field(default_factory=_uuid_pk, primary_key=True)
+    instance_id: str = Field(index=True)
+    slug: str  # stable handle, ^[a-z0-9-]+$, unique per instance
+    title: str
+    current_version: int = 1
+    visibility: str = Field(default="public")  # public|private
+    owner_agent_id: UUID | None = Field(
+        default=None, foreign_key="agent_registry.agent_id"
+    )
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class DocVersionRow(SQLModel, table=True):
+    """One immutable version of a document's content (append-only)."""
+
+    __tablename__ = "doc_version"
+
+    id: UUID = Field(default_factory=_uuid_pk, primary_key=True)
+    doc_id: UUID = Field(foreign_key="doc.id", index=True)
+    version: int
+    content: str
+    change_note: str = ""
+    written_by: str  # actor: "founder" | "cga" (same pattern as attestation)
+    created_at: datetime = Field(default_factory=_now)
+
+
 ALL_TABLES = [
     InstanceRow, AgentRegistryRow, TensionRow, ProposalRow,
     VoteRow, DecisionRow, LedgerEventRow, RunnerStateRow, EpochRow,
+    DocRow, DocVersionRow,
 ]
 
 MIGRATIONS_DIR = REPO_ROOT / "migrations"
@@ -443,6 +483,149 @@ def effective_weight(row: AgentRegistryRow | None) -> float:
     if row is None or not row.attested:
         return 1.0
     return row.weight
+
+
+# ── Document root CRUD (O1) ───────────────────────────────────────────────────
+
+
+def create_doc(
+    session: SMSession,
+    *,
+    instance_id: str,
+    slug: str,
+    title: str,
+    content: str,
+    written_by: str = "founder",
+    visibility: str = "public",
+    owner_agent_id: UUID | None = None,
+    change_note: str = "",
+) -> DocRow | None:
+    """Create a document at version 1 (O1). None if the slug is taken.
+
+    Mirrors the create to the ledger as `doc-created` — the doc root has the
+    same public-record properties as everything else. Callers gate writes
+    (founder/CGA token at the API layer); the store records the actor.
+    """
+    if get_doc(session, instance_id=instance_id, slug=slug) is not None:
+        return None
+    doc = DocRow(
+        instance_id=instance_id, slug=slug, title=title,
+        current_version=1, visibility=visibility, owner_agent_id=owner_agent_id,
+    )
+    session.add(doc)
+    session.flush()
+    session.add(DocVersionRow(
+        doc_id=doc.id, version=1, content=content,
+        change_note=change_note or "initial version", written_by=written_by,
+    ))
+    append_ledger_event(
+        session, instance_id=instance_id, event_type="doc-created",
+        payload={"doc_id": str(doc.id), "slug": slug, "title": title,
+                 "version": 1, "actor": written_by,
+                 "change_note": change_note or "initial version",
+                 "visibility": visibility},
+    )
+    session.flush()
+    return doc
+
+
+def update_doc(
+    session: SMSession,
+    *,
+    doc: DocRow,
+    content: str,
+    written_by: str = "founder",
+    change_note: str = "",
+    visibility: str | None = None,
+) -> DocRow:
+    """Append the next version of a document (append-only — nothing mutates
+    in place; history stays reconstructable). Bumps current_version, records
+    `doc-updated` with the actor. A visibility change (ROADMAP_V2 §3:
+    making a private doc public is itself a governed act) rides the same
+    event payload — the ledger carries both the old and new value.
+    """
+    next_version = doc.current_version + 1
+    prior_visibility = doc.visibility
+    session.add(DocVersionRow(
+        doc_id=doc.id, version=next_version, content=content,
+        change_note=change_note, written_by=written_by,
+    ))
+    doc.current_version = next_version
+    doc.updated_at = datetime.now(UTC)
+    if visibility is not None:
+        doc.visibility = visibility
+    session.add(doc)
+    append_ledger_event(
+        session, instance_id=doc.instance_id, event_type="doc-updated",
+        payload={"doc_id": str(doc.id), "slug": doc.slug,
+                 "version": next_version, "actor": written_by,
+                 "change_note": change_note,
+                 "visibility": doc.visibility,
+                 "visibility_changed": (
+                     visibility is not None and visibility != prior_visibility
+                 ),
+                 "prior_visibility": prior_visibility if
+                 visibility is not None and visibility != prior_visibility
+                 else None},
+    )
+    session.flush()
+    return doc
+
+
+def get_doc(
+    session: SMSession, *, instance_id: str, slug: str,
+) -> DocRow | None:
+    """Fetch a document by (instance, slug). None if absent."""
+    stmt = select(DocRow).where(
+        DocRow.instance_id == instance_id, DocRow.slug == slug,
+    )
+    rows = list(session.exec(stmt).all())
+    return rows[0] if rows else None
+
+
+def get_doc_version(
+    session: SMSession, *, doc_id: UUID, version: int,
+) -> DocVersionRow | None:
+    """Fetch one specific version's content. None if absent."""
+    stmt = select(DocVersionRow).where(
+        DocVersionRow.doc_id == doc_id, DocVersionRow.version == version,
+    )
+    rows = list(session.exec(stmt).all())
+    return rows[0] if rows else None
+
+
+def list_docs(
+    session: SMSession, *, instance_id: str,
+    include_private_for: UUID | None = None,
+    include_all_private: bool = False,
+) -> list[DocRow]:
+    """List documents for an instance, newest-updated first.
+
+    Default: public docs only. `include_private_for` (an agent_id) adds the
+    private docs that agent owns; `include_all_private` (the staff/CGA
+    context) adds every private doc.
+    """
+    stmt = select(DocRow).where(DocRow.instance_id == instance_id)
+    rows = list(session.exec(stmt).all())
+    out = [
+        d for d in rows
+        if d.visibility == "public"
+        or include_all_private
+        or (include_private_for is not None
+            and d.owner_agent_id == include_private_for)
+    ]
+    out.sort(key=lambda d: d.updated_at, reverse=True)
+    return out
+
+
+def list_doc_history(
+    session: SMSession, *, doc_id: UUID,
+) -> list[DocVersionRow]:
+    """A document's full version history, newest first (append-only record)."""
+    stmt = select(DocVersionRow).where(DocVersionRow.doc_id == doc_id)
+    rows = list(session.exec(stmt).all())
+    rows.sort(key=lambda v: v.version, reverse=True)
+    return rows
 
 
 # ── Tension backlog CRUD (S5) ────────────────────────────────────────────────

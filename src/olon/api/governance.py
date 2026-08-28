@@ -352,6 +352,12 @@ def build_governance_digest(
         "founder_vetoes": _count("founder-veto"),
     }
 
+    # ── Doc root facts (O1): writes in the window ──
+    docs_facts = {
+        "created": _count("doc-created"),
+        "updated": _count("doc-updated"),
+    }
+
     # ── Deterministic flags (code-computed; the LLM may ADD, not replace) ──
     flags: list[str] = []
     if pending:
@@ -378,6 +384,7 @@ def build_governance_digest(
         },
         "tensions": {"by_status": by_status, "untriaged_old": untriaged_old},
         "cycles": cycles,
+        "docs": docs_facts,
     }
 
     # ── The CGA's contribution: themes + flags, never counts ──

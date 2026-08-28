@@ -161,3 +161,17 @@ verify live → ledger/doc record. No exceptions.
 | **Measured outcome** | Acceptance met in code: the CGA presents a queue (`GET /governance/attestation-queue`), attests within bounds by token, and digests daily. "Adrian no longer attests by hand" completes with the roster registration + first real use (ops step). |
 | **Sequenced next** | O1 (doc root) → S1/S2 (COA + feedback) opens the first real-world loop, per §5. |
 | **Docs** | AGENT_PROTOCOL.md v1.1 (§5.5.1 governance surface); SECURITY.md §7a + change log; staff_roster.md §2 flipped. |
+
+---
+
+## 8. Sprint record — O1 (shipped 2026-08-28)
+
+| Field | Record |
+|---|---|
+| **Trigger** | v2 §5 sequencing (G1 → O1 → S1/S2); G1 close-out left the doc root as the next blocker — sprint records and onboarding artefacts had no governed home. |
+| **Scope** | The shared document root: `doc`/`doc_version` tables (migration 0008, append-only versions), docs API (public read, staff-token write, private docs gated to owner + founder per §3's IP clause), ledger mirroring (`doc-created`/`doc-updated` with actor), idempotent startup seed of the five authoritative docs, `/docs/<file>.md` served from the doc root (edits live without redeploy), digest gains doc-write counts. |
+| **Decisions** | Writes are staff-token direct (founder/CGA) — consent-routing of doc changes is G2, per the roadmap's own split. Private docs shipped now (§3 model). |
+| **Tests** | 8 new (`tests/test_docs_unit.py` — versioning, auth gates, private-gating matrix, privatised-doc 404, seed idempotency, static fallback); migrations expectations updated. Full gate green. |
+| **Measured outcome** | Acceptance met: handbook + protocol + both roadmaps + the security ledger live in the doc root; an API edit is visible at the public `/docs/…` URL immediately. Repo files become seed-only. |
+| **Sequenced next** | S1/S2 (COA + feedback artefact) opens the first real-world loop; the COA's onboarding pack now has a doc-root home to point newcomers at. |
+| **Docs** | AGENT_PROTOCOL.md v1.2 (§3.6); SECURITY.md §7b; this record. |

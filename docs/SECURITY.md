@@ -41,6 +41,7 @@ those four.
 | 9 | Per-agent authn (agent_id is spoofable) | medium | ⏳ roadmap (protocol v2) | accepted risk, §9 below |
 | 10 | **Delegated-attestation token abuse (CGA)** | medium | ✅ G1 (§7a) | `api/governance.py`, attest route bounds |
 | 11 | **Ungated triage endpoint (LLM burn + record writes)** | medium | ✅ G1 (§7a) | `routes._gate_triage` (doc'd S5 gate, now enforced) |
+| 12 | **Doc-root write abuse / private-doc leakage** | medium | ✅ O1 (§7b) | `api/docs.py` (staff-token writes, visibility gating) |
 
 ---
 
@@ -274,6 +275,39 @@ is a shared static secret like the founder token — same handling rules
 
 ---
 
+## 7b. O1 — The shared document root (2026-08-28)
+
+**Write surface.** Doc creation and versioning (`POST/PUT …/docs`) require
+the founder or CGA token — the same two-token staff surface G1 introduced,
+no new secret. Every write appends an immutable version row and mirrors to
+the ledger (`doc-created`/`doc-updated`) with its actor, so doc history has
+the same public-record properties as attestation.
+
+**Private docs (the §3 IP clause).** `visibility: private` + owner: readable
+only via the owner's agent_id handle or a staff token. Known limitation,
+same family as accepted risk §9: the owner gate is `?as_agent=<agent_id>` —
+a handle, not an identity (v1 has no per-agent authn). Public-to-private
+transitions take effect immediately at `/docs/<file>` — a privatised seeded
+doc serves 404 there, never the stale static repo copy (leak closed by
+design + test).
+
+**Content bounds.** Slug `^[a-z0-9-]+$` (validated), title 200, note 500,
+content 512 KB (Pydantic boundary; the 1 MB body cap is the outer
+backstop). Served filenames are charset-restricted — no path traversal.
+Content is markdown data, never interpolated into LLM prompts (no LLM in
+the doc path at all).
+
+**Tests:** `tests/test_docs_unit.py` (versioning + ledger mirroring,
+write auth gates, private-doc gating matrix, privatised-seeded-doc 404,
+seed idempotency preserving manual edits, static PDF fallback, traversal
+refusal).
+
+**Not covered (deliberate):** consent-routed doc changes + revert rights
+(G2), doc rendering/search. Staff writes are attributed but not
+consent-governed yet.
+
+---
+
 ## 8. Rubber-stamping & collusion (ongoing — addressed by roadmap)
 
 **In place today** (defense-in-depth, not a solution):
@@ -340,3 +374,4 @@ signal.
 | 2026-08-24 | H11 | statistical digest in code, blind round-1, themes-only Summarizer |
 | 2026-08-24 | H12 | prompt-data invariant written down + redaction tripwires at 3 choke points |
 | 2026-08-28 | G1 | CGA governance surface: bounded delegated attestation, attributed ledger events, triage gate enforced, counts-from-code digest |
+| 2026-08-28 | O1 | shared doc root: staff-token versioned writes, ledger-mirrored; private-doc gating; privatised seeded docs 404 at /docs |

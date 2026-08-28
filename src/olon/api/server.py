@@ -19,9 +19,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from olon.api.docs import router as docs_router
+from olon.api.docs import seed_doc_root, serve_doc_root
 from olon.api.feed import FeedBroker
 from olon.api.governance import router as governance_router
 from olon.api.routes import router
@@ -81,7 +83,9 @@ def _any_digest_instance() -> bool:
 async def lifespan(app: FastAPI):
     """Start the epoch scheduler (if any instance is non-manual) and the
     digest scheduler (if any instance opts into scheduled digests), cancel
-    both on shutdown."""
+    both on shutdown. Seeds the doc root (O1) before serving — idempotent,
+    never overwrites."""
+    seed_doc_root(DOCS_DIR)
     tasks: list[asyncio.Task] = []
     if _any_scheduled_instance():
         tasks.append(asyncio.create_task(epoch_scheduler(app)))
@@ -122,6 +126,7 @@ def create_app() -> FastAPI:
 
     app.include_router(router)
     app.include_router(governance_router)
+    app.include_router(docs_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -131,6 +136,24 @@ def create_app() -> FastAPI:
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
+
+    # O1: the doc root (database) is authoritative for the seeded markdown
+    # files — an API edit is live immediately, no redeploy. Everything else
+    # under /docs (PDFs, posters) keeps serving from the repo directory.
+    # Registered BEFORE the static mount below so this route matches first.
+    _SAFE_FILENAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+    @app.get("/docs/{filename}")
+    async def docs_file(filename: str) -> Response:
+        if not filename or not set(filename) <= _SAFE_FILENAME:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        doc_root = serve_doc_root(filename)
+        if doc_root is not None:
+            return doc_root
+        path = DOCS_DIR / filename
+        if not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(path)
 
     # Protocol discoverability — where an agent finds the machine-readable
     # protocol + the human handbook. Linked from the kimberim.com engage surface.

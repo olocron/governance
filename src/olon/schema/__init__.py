@@ -274,6 +274,9 @@ class LedgerEvent(BaseModel):
         "agent-attested",
         "agent-attestation-revoked",
         "governance-digest",
+        # O1: the shared document root (versioned, actor-attributed writes).
+        "doc-created",
+        "doc-updated",
     ]
     # The structured payload (one of the cycle models above), JSON-encoded.
     payload: dict
