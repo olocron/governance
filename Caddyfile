@@ -1,8 +1,14 @@
 # Caddy reverse proxy for the OLOCRON engage API.
 #
-# Caddy automatically provisions and renews a Let's Encrypt TLS certificate
-# for api.kimberim.com (requires the DNS A-record to point at this server
-# and ports 80+443 to be reachable from the internet).
+# Caddy automatically provisions and renews Let's Encrypt TLS certificates
+# for api.kimberim.com and api.olocron.org (requires each domain's DNS
+# A-record to point at this server and ports 80+443 reachable).
+#
+# api.olocron.org is the forward address (olocron.org not yet registered at
+# time of staging): until its A-record exists, Caddy will log ACME issuance
+# failures for that name and retry with backoff — harmless to the live
+# kimberim.com site. Once DNS points here, TLS + proxying start working
+# with no further config change.
 #
 # No manual cert management needed — this is the whole HTTPS config.
 
@@ -19,7 +25,7 @@
 	}
 }
 
-api.kimberim.com {
+api.kimberim.com, api.olocron.org {
 	# Stream immediately (flush_interval -1) — SSE deliberation events on
 	# /deliberations/{run_id}/events must reach the client unbuffered.
 	# No `encode` (compression): gzip would buffer event streams.
