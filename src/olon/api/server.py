@@ -36,10 +36,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs"
 
 # Origins allowed to make cross-origin requests to the API. The kimberim.com
-# Apply Here form POSTs cross-origin; localhost is for local dev.
+# Apply Here form POSTs cross-origin; the olocron.org marketing site pings
+# /health; localhost is for local dev.
 _CORS_ORIGINS = [
     "https://kimberim.com",
     "https://www.kimberim.com",
+    "https://olocron.org",
+    "https://www.olocron.org",
     "http://localhost:8787",
     "http://127.0.0.1:8787",
     # Permissive for any localhost port during local development.
